@@ -1,0 +1,12 @@
+
+config OPENBMC_DBUS_SENSORS
+    bool "openbmc dbus sensors"
+    select OPENBMC_SDBUSPLUS
+    select BASU
+    # select OPENBMC_PHOSPHOR_DBUS_INTERFACES
+    select CPP_EXCEPTIONS
+    select EVENTFD
+    select OPENBMC_LIBGPIOD
+    select OPENBMC_I2C_TOOLS
+    help
+      Enable OpenBMC dbus-sensors on Zephyr.

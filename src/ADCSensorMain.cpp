@@ -35,6 +35,14 @@
 #include <variant>
 #include <vector>
 
+#ifdef __ZEPHYR__
+#include <dbus_broker.h>
+#include <zephyr/kernel.h>
+#include <printk_thread.h>
+
+extern struct k_sem adc_sensor_ready_sem;
+#endif
+
 static constexpr float pollRateDefault = 0.5;
 static constexpr float gpioBridgeSetupTimeDefault = 0.02;
 
@@ -295,7 +303,127 @@ void createSensors(
     getter->getConfiguration(
         std::vector<std::string>{sensorTypes.begin(), sensorTypes.end()});
 }
+#ifdef __ZEPHYR__
+int adc_sensor_main()
+{
+    printk_thread(">>> adc_sensor_main");
+    boost::asio::io_context io;
+    sd_bus* bus = nullptr;
+    int rc = connect_to_dbroker(&bus);
+    if (rc < 0)
+    {
+        printk_thread("Failed to connect to dbroker: %d", rc);
+        return rc;
+    }
+    auto systemBus = std::make_shared<sdbusplus::asio::connection>(io, bus);
 
+    sdbusplus::asio::object_server objectServer(systemBus, true);
+    objectServer.add_manager("/xyz/openbmc_project/sensors");
+
+    systemBus->request_name("xyz.openbmc_project.ADCSensor");
+    boost::container::flat_map<std::string, std::shared_ptr<ADCSensor>> sensors;
+    auto sensorsChanged =
+        std::make_shared<boost::container::flat_set<std::string>>();
+
+    boost::asio::post(io, [&]() {
+        createSensors(io, objectServer, sensors, systemBus, nullptr,
+                      UpdateType::init);
+    });
+
+    boost::asio::steady_timer filterTimer(io);
+    std::function<void(sdbusplus::message_t&)> eventHandler =
+        [&](sdbusplus::message_t& message) {
+        if (message.is_method_error())
+        {
+            std::cerr << "callback method error\n";
+            return;
+        }
+        sensorsChanged->insert(message.get_path());
+        // this implicitly cancels the timer
+        filterTimer.expires_after(std::chrono::seconds(1));
+
+        filterTimer.async_wait([&](const boost::system::error_code& ec) {
+            if (ec == boost::asio::error::operation_aborted)
+            {
+                /* we were canceled*/
+                return;
+            }
+            if (ec)
+            {
+                std::cerr << "timer error\n";
+                return;
+            }
+            createSensors(io, objectServer, sensors, systemBus, sensorsChanged,
+                          UpdateType::init);
+        });
+    };
+
+    boost::asio::steady_timer cpuFilterTimer(io);
+    std::function<void(sdbusplus::message_t&)> cpuPresenceHandler =
+        [&](sdbusplus::message_t& message) {
+        std::string path = message.get_path();
+        boost::to_lower(path);
+
+        sdbusplus::message::object_path cpuPath(path);
+        std::string cpuName = cpuPath.filename();
+        if (!cpuName.starts_with("cpu"))
+        {
+            return; // not interested
+        }
+        size_t index = 0;
+        try
+        {
+            index = std::stoi(path.substr(path.size() - 1));
+        }
+        catch (const std::invalid_argument&)
+        {
+            std::cerr << "Found invalid path " << path << "\n";
+            return;
+        }
+
+        std::string objectName;
+        boost::container::flat_map<std::string, std::variant<bool>> values;
+        message.read(objectName, values);
+        auto findPresence = values.find("Present");
+        if (findPresence != values.end())
+        {
+            cpuPresence[index] = std::get<bool>(findPresence->second);
+        }
+
+        // this implicitly cancels the timer
+        cpuFilterTimer.expires_after(std::chrono::seconds(1));
+
+        cpuFilterTimer.async_wait([&](const boost::system::error_code& ec) {
+            if (ec == boost::asio::error::operation_aborted)
+            {
+                /* we were canceled*/
+                return;
+            }
+            if (ec)
+            {
+                std::cerr << "timer error\n";
+                return;
+            }
+            createSensors(io, objectServer, sensors, systemBus, nullptr,
+                          UpdateType::cpuPresenceChange);
+        });
+    };
+
+    std::vector<std::unique_ptr<sdbusplus::bus::match_t>> matches =
+        setupPropertiesChangedMatches(*systemBus, sensorTypes, eventHandler);
+    matches.emplace_back(std::make_unique<sdbusplus::bus::match_t>(
+        static_cast<sdbusplus::bus_t&>(*systemBus),
+        "type='signal',member='PropertiesChanged',path_namespace='" +
+            std::string(cpuInventoryPath) +
+            "',arg0namespace='xyz.openbmc_project.Inventory.Item'",
+        cpuPresenceHandler));
+
+    setupManufacturingModeMatch(*systemBus);
+    k_sem_give(&adc_sensor_ready_sem);
+
+    io.run();
+}
+#else
 int main()
 {
     boost::asio::io_context io;
@@ -404,3 +532,4 @@ int main()
     setupManufacturingModeMatch(*systemBus);
     io.run();
 }
+#endif /* __ZEPHYR__ */

@@ -170,8 +170,12 @@ void ADCSensor::handleResponse(const boost::system::error_code& err)
         {
             rawValue = std::stod(response);
             double nvalue = (rawValue / sensorScaleFactor) / scaleFactor;
+#ifdef __ZEPHYR__
+            nvalue = round(nvalue * roundFactor) / roundFactor;
+#else
             nvalue = std::round(nvalue * roundFactor) / roundFactor;
-            updateValue(nvalue);
+#endif
+        updateValue(nvalue);
         }
         catch (const std::invalid_argument&)
         {
