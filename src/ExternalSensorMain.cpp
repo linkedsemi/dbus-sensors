@@ -21,6 +21,20 @@
 #include <variant>
 #include <vector>
 
+#ifdef __ZEPHYR__
+#include <iostream>
+
+#include <dbus_broker.h>
+#include <zephyr/kernel.h>
+#include <printk_thread.h>
+
+extern struct k_sem external_sensor_ready_sem;
+
+/* Enable a built-in self-test that emulates an external writer (see below).
+ * Set to 0 to disable. */
+#define EXTERNAL_SENSOR_SELFTEST 1
+#endif
+
 // Copied from HwmonTempSensor and inspired by
 // https://gerrit.openbmc-project.xyz/c/openbmc/dbus-sensors/+/35476
 
@@ -330,6 +344,224 @@ void createSensors(
     getter->getConfiguration(std::vector<std::string>{sensorType});
 }
 
+#ifdef __ZEPHYR__
+
+#if EXTERNAL_SENSOR_SELFTEST
+/*
+ * Self-test emulating an "external writer".
+ *
+ * It drives the sensor purely through the dbus broker (just like a real
+ * external data source would), so the full external-set path is validated
+ * end-to-end without any hardware:
+ *
+ *   Properties.Set("Value")
+ *     -> Sensor::setSensorValue          (sensor.hpp:224)
+ *     -> externalSetHook
+ *     -> ExternalSensor::externalSetTrigger (ExternalSensor.cpp:185)
+ *     -> writeBegin()  (records timestamp, marks alive)
+ *
+ * It also toggles the State.Decorator.Availability property midway to
+ * exercise that path (Available=false drives Value -> NaN).
+ */
+static void externalSensorSelfTest(
+    boost::asio::io_context& io,
+    sdbusplus::asio::object_server& objectServer,
+    std::shared_ptr<sdbusplus::asio::connection>& bus,
+    boost::container::flat_map<std::string, std::shared_ptr<ExternalSensor>>&
+        sensors)
+{
+    auto timer = std::make_shared<boost::asio::steady_timer>(io);
+    auto waitedOnce = std::make_shared<bool>(false);
+    auto remaining = std::make_shared<int>(5);
+    auto step = std::make_shared<int>(0);
+    auto tick = std::make_shared<std::function<void()>>();
+
+    // Phase A: wait a single time for entity-manager to publish the
+    // ExternalSensor config (its 5s debounce + ~1s processing).
+    // If sensors still empty after that, fallback creates its own sensor.
+
+    *tick = [timer, waitedOnce, remaining, step, &bus, &objectServer,
+             &sensors, tick]() {
+        // Phase A: single delay for entity-manager.
+        if (sensors.empty() && !*waitedOnce)
+        {
+            *waitedOnce = true;
+            printk_thread("self-test: waiting 6s for ExternalSensor config");
+            timer->expires_after(std::chrono::seconds(6));
+            timer->async_wait([timer, tick](boost::system::error_code) {
+                (*tick)();
+            });
+            return;
+        }
+
+        // Fallback: if still nothing, create a sensor directly so the write
+        // path is still validated (entity-manager may be slow or absent).
+        if (sensors.empty())
+        {
+            printk_thread("self-test: no config after 6s, creating fallback "
+                          "sensor 'SelfTestExternalSensor'");
+            std::vector<thresholds::Threshold> noThresholds;
+            auto& entry = sensors["SelfTestExternalSensor"];
+            entry = std::make_shared<ExternalSensor>(
+                "ExternalSensor", objectServer, bus, "SelfTestExternalSensor",
+                "DegreesC", std::move(noThresholds),
+                "/xyz/openbmc_project/inventory/system/board/"
+                "SelfTestExternalSensor",
+                125.0, -40.0, 0.0, PowerState::always);
+            entry->initWriteHook(
+                [](const std::chrono::steady_clock::time_point&) {});
+        }
+
+        if (*remaining <= 0)
+        {
+            printk_thread("self-test: finished 5 external writes");
+            return;
+        }
+
+        double value = 20.0 + (*step) * 5.0;  // 20, 25, 30, 35, 40
+
+        for (auto& kv : sensors)
+        {
+            const std::string& name = kv.first;
+            std::shared_ptr<ExternalSensor>& sensor = kv.second;
+            std::string path = sensor->sensorInterface->get_object_path();
+
+            bus->async_method_call(
+                [name, value](boost::system::error_code ec) {
+                    if (ec)
+                    {
+                        printk_thread("self-test: Set Value %s=%.1f FAIL %d",
+                                      name.c_str(), value, ec.value());
+                    }
+                    else
+                    {
+                        printk_thread("self-test: Set Value %s=%.1f OK",
+                                      name.c_str(), value);
+                    }
+                },
+                "xyz.openbmc_project.ExternalSensor", path,
+                "org.freedesktop.DBus.Properties", "Set",
+                "xyz.openbmc_project.Sensor.Value", "Value",
+                std::variant<double>(value));
+
+            // Midway, toggle the Availability decorator off then on to
+            // exercise the State.Decorator.Availability path
+            // (Available=false drives Value -> NaN).
+            if (*step == 2)
+            {
+                bus->async_method_call(
+                    [](boost::system::error_code) {},
+                    "xyz.openbmc_project.ExternalSensor", path,
+                    "org.freedesktop.DBus.Properties", "Set",
+                    "xyz.openbmc_project.State.Decorator.Availability",
+                    "Available", std::variant<bool>(false));
+            }
+            if (*step == 3)
+            {
+                bus->async_method_call(
+                    [](boost::system::error_code) {},
+                    "xyz.openbmc_project.ExternalSensor", path,
+                    "org.freedesktop.DBus.Properties", "Set",
+                    "xyz.openbmc_project.State.Decorator.Availability",
+                    "Available", std::variant<bool>(true));
+            }
+        }
+
+        --(*remaining);
+        ++(*step);
+
+        timer->expires_after(std::chrono::seconds(1));
+        timer->async_wait([timer, tick](boost::system::error_code) {
+            (*tick)();
+        });
+    };
+
+    timer->async_wait([timer, tick](boost::system::error_code) {
+        (*tick)();
+    });
+}
+#endif /* EXTERNAL_SENSOR_SELFTEST */
+
+int external_sensor_main()
+{
+    printk_thread(">>> external_sensor_main");
+    boost::asio::io_context io;
+    sd_bus* bus = nullptr;
+    int rc = connect_to_dbroker(&bus);
+    if (rc < 0)
+    {
+        printk_thread("Failed to connect to dbroker: %d", rc);
+        return rc;
+    }
+    auto systemBus = std::make_shared<sdbusplus::asio::connection>(io, bus);
+
+    sdbusplus::asio::object_server objectServer(systemBus, true);
+    objectServer.add_manager("/xyz/openbmc_project/sensors");
+
+    systemBus->request_name("xyz.openbmc_project.ExternalSensor");
+
+    boost::container::flat_map<std::string, std::shared_ptr<ExternalSensor>>
+        sensors;
+    auto sensorsChanged =
+        std::make_shared<boost::container::flat_set<std::string>>();
+    boost::asio::steady_timer reaperTimer(io);
+
+    boost::asio::post(io, [&objectServer, &sensors, &systemBus,
+                            &reaperTimer]() {
+        createSensors(objectServer, sensors, systemBus, nullptr, reaperTimer);
+    });
+
+    boost::asio::steady_timer filterTimer(io);
+    std::function<void(sdbusplus::message_t&)> eventHandler =
+        [&objectServer, &sensors, &systemBus, &sensorsChanged, &filterTimer,
+         &reaperTimer](sdbusplus::message_t& message) {
+        if (message.is_method_error())
+        {
+            std::cerr << "callback method error\n";
+            return;
+        }
+
+        const auto* messagePath = message.get_path();
+        sensorsChanged->insert(messagePath);
+        if constexpr (debug)
+        {
+            std::cerr << "ExternalSensor change event received: "
+                      << messagePath << "\n";
+        }
+
+        // this implicitly cancels the timer
+        filterTimer.expires_after(std::chrono::seconds(1));
+
+        filterTimer.async_wait(
+            [&objectServer, &sensors, &systemBus, &sensorsChanged,
+             &reaperTimer](const boost::system::error_code& ec) {
+            if (ec != boost::system::errc::success)
+            {
+                if (ec != boost::asio::error::operation_aborted)
+                {
+                    std::cerr << "callback error: " << ec.message() << "\n";
+                }
+                return;
+            }
+
+            createSensors(objectServer, sensors, systemBus, sensorsChanged,
+                          reaperTimer);
+        });
+    };
+
+    std::vector<std::unique_ptr<sdbusplus::bus::match_t>> matches =
+        setupPropertiesChangedMatches(
+            *systemBus, std::to_array<const char*>({sensorType}), eventHandler);
+
+#if EXTERNAL_SENSOR_SELFTEST
+    externalSensorSelfTest(io, objectServer, systemBus, sensors);
+#endif
+
+    k_sem_give(&external_sensor_ready_sem);
+
+    io.run();
+}
+#else
 int main()
 {
     if constexpr (debug)
@@ -404,3 +636,4 @@ int main()
 
     io.run();
 }
+#endif /* __ZEPHYR__ */

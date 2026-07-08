@@ -26,8 +26,8 @@ if(CONFIG_OPENBMC_DBUS_SENSORS)
             # ${ZEPHYR_CURRENT_MODULE_DIR}/src/ChassisIntrusionSensor.cpp
             # ${ZEPHYR_CURRENT_MODULE_DIR}/src/DeviceMgmt.cpp
             # #${ZEPHYR_CURRENT_MODULE_DIR}/src/ExitAirTempSensor.cpp
-            # ${ZEPHYR_CURRENT_MODULE_DIR}/src/ExternalSensor.cpp
-            # ${ZEPHYR_CURRENT_MODULE_DIR}/src/ExternalSensorMain.cpp
+            ${ZEPHYR_CURRENT_MODULE_DIR}/src/ExternalSensor.cpp
+            ${ZEPHYR_CURRENT_MODULE_DIR}/src/ExternalSensorMain.cpp
             # ${ZEPHYR_CURRENT_MODULE_DIR}/src/FileHandle.cpp
             # ${ZEPHYR_CURRENT_MODULE_DIR}/src/FanMain.cpp
             # ${ZEPHYR_CURRENT_MODULE_DIR}/src/HwmonTempSensor.cpp
