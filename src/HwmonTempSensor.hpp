@@ -4,7 +4,7 @@
 #include "Thresholds.hpp"
 #include "sensor.hpp"
 
-#include <boost/asio/random_access_file.hpp>
+#include <boost/asio/posix/stream_descriptor.hpp>
 #include <sdbusplus/asio/object_server.hpp>
 
 #include <string>
@@ -52,7 +52,7 @@ class HwmonTempSensor :
     std::array<char, 128> readBuf{};
     std::shared_ptr<I2CDevice> i2cDevice;
     sdbusplus::asio::object_server& objServer;
-    boost::asio::random_access_file inputDev;
+    boost::asio::posix::stream_descriptor inputDev;
     boost::asio::steady_timer waitTimer;
     std::string path;
     double offsetValue;

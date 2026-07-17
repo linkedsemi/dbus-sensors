@@ -330,8 +330,27 @@ static void createSensorsCallback(
             continue; // check if path has already been searched
         }
 
+        std::string deviceName;
+#ifdef __ZEPHYR__
+        /* Zephyr devfs exposes no `device` symlink under hwmon nodes; instead
+         * the hwmon_i2c driver provides a `bus_addr` attribute file whose
+         * content is "<bus>-<addr>" (e.g. "1-0048"). Read it to pair this
+         * node with the Entity Manager config keyed by {Bus, Address}. */
+        {
+            std::ifstream busAddrFile(directory / "bus_addr");
+            if (!busAddrFile.good())
+            {
+                std::cerr << "Failure reading bus_addr for " << directory
+                          << "\n";
+                continue;
+            }
+            std::getline(busAddrFile, deviceName);
+            busAddrFile.close();
+        }
+#else
         fs::path device = directory / "device";
-        std::string deviceName = fs::canonical(device).stem();
+        deviceName = fs::canonical(device).stem();
+#endif
         auto findHyphen = deviceName.find('-');
         if (findHyphen == std::string::npos)
         {

@@ -38,6 +38,14 @@
 #include <variant>
 #include <vector>
 
+#ifdef __ZEPHYR__
+#include <dbus_broker.h>
+#include <printk_thread.h>
+#include <zephyr/kernel.h>
+
+extern struct k_sem hwmon_temp_sensor_ready_sem;
+#endif /* __ZEPHYR__ */
+
 static constexpr float pollRateDefault = 0.5;
 
 static constexpr double maxValuePressure = 120000; // Pascals
@@ -371,8 +379,25 @@ void createSensors(
             }
             else
             {
+#ifdef __ZEPHYR__
+                /* Zephyr devfs exposes no `device` symlink under hwmon nodes;
+                 * instead hwmon_i2c provides a `bus_addr` attribute file whose
+                 * content is "<bus>-<addr>" (e.g. "1-0048"). Read it to pair
+                 * this node with the Entity Manager config keyed by
+                 * {Bus, Address}. */
+                std::ifstream busAddrFile(directory / "bus_addr");
+                if (!busAddrFile.good())
+                {
+                    std::cerr << "Failure reading bus_addr for " << directory
+                              << "\n";
+                    continue;
+                }
+                std::getline(busAddrFile, deviceName);
+                busAddrFile.close();
+#else
                 device = directory / "device";
                 deviceName = fs::canonical(device).stem();
+#endif
             }
             auto findHyphen = deviceName.find('-');
             if (findHyphen == std::string::npos)
@@ -644,10 +669,26 @@ static void powerStateChanged(
     }
 }
 
+#ifdef __ZEPHYR__
+int hwmon_temp_sensor_main()
+#else
 int main()
+#endif
 {
     boost::asio::io_context io;
+#ifdef __ZEPHYR__
+    printk_thread(">>> hwmon_temp_sensor_main");
+    sd_bus* bus = nullptr;
+    int rc = connect_to_dbroker(&bus);
+    if (rc < 0)
+    {
+        printk_thread("Failed to connect to dbroker: %d", rc);
+        return rc;
+    }
+    auto systemBus = std::make_shared<sdbusplus::asio::connection>(io, bus);
+#else
     auto systemBus = std::make_shared<sdbusplus::asio::connection>(io);
+#endif
     sdbusplus::asio::object_server objectServer(systemBus, true);
     objectServer.add_manager("/xyz/openbmc_project/sensors");
     systemBus->request_name("xyz.openbmc_project.HwmonTempSensor");
@@ -710,6 +751,10 @@ int main()
         });
 
     matches.emplace_back(std::move(ifaceRemovedMatch));
+
+#ifdef __ZEPHYR__
+    k_sem_give(&hwmon_temp_sensor_ready_sem);
+#endif
 
     io.run();
 }

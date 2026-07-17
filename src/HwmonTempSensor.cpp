@@ -17,6 +17,7 @@
 #include "HwmonTempSensor.hpp"
 
 #include <unistd.h>
+#include <fcntl.h>
 
 #include <boost/asio/read_until.hpp>
 #include <sdbusplus/asio/connection.hpp>
@@ -54,11 +55,15 @@ HwmonTempSensor::HwmonTempSensor(
            false, thisSensorParameters.maxValue, thisSensorParameters.minValue,
            conn, powerState),
     i2cDevice(i2cDevice), objServer(objectServer),
-    inputDev(io, path, boost::asio::random_access_file::read_only),
-    waitTimer(io), path(path), offsetValue(thisSensorParameters.offsetValue),
+    inputDev(io), waitTimer(io), path(path), offsetValue(thisSensorParameters.offsetValue),
     scaleValue(thisSensorParameters.scaleValue),
     sensorPollMs(static_cast<unsigned int>(pollRate * 1000))
 {
+    int fd = open(path.c_str(), O_RDONLY);
+    if (fd >= 0)
+    {
+        inputDev.assign(fd);
+    }
     sensorInterface = objectServer.add_interface(
         "/xyz/openbmc_project/sensors/" + thisSensorParameters.typeName + "/" +
             name,
@@ -90,7 +95,11 @@ void HwmonTempSensor::activate(const std::string& newPath,
 {
     path = newPath;
     i2cDevice = newI2CDevice;
-    inputDev.open(path, boost::asio::random_access_file::read_only);
+    int fd = open(path.c_str(), O_RDONLY);
+    if (fd >= 0)
+    {
+        inputDev.assign(fd);
+    }
     markAvailable(true);
     setupRead();
 }
@@ -128,8 +137,8 @@ void HwmonTempSensor::setupRead(void)
     }
 
     std::weak_ptr<HwmonTempSensor> weakRef = weak_from_this();
-    inputDev.async_read_some_at(
-        0, boost::asio::buffer(readBuf),
+    inputDev.async_read_some(
+        boost::asio::buffer(readBuf),
         [weakRef](const boost::system::error_code& ec, std::size_t bytesRead) {
         std::shared_ptr<HwmonTempSensor> self = weakRef.lock();
         if (self)
@@ -187,6 +196,19 @@ void HwmonTempSensor::handleResponse(const boost::system::error_code& err,
     {
         incrementError();
     }
+
+#ifdef __ZEPHYR__
+    /* Zephyr devfs sysfs attributes return the value once per open (ppos),
+     * then EOF. Reopen the fd each poll cycle so every read gets a fresh
+     * value (mirrors ADCSensor). Without this, only the first poll after
+     * open returns data; later polls hit EOF -> incrementError -> Value=nan. */
+    inputDev.close();
+    int fd = open(path.c_str(), O_RDONLY);
+    if (fd >= 0)
+    {
+        inputDev.assign(fd);
+    }
+#endif
 
     restartRead();
 }
