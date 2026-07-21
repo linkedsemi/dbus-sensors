@@ -20,6 +20,8 @@
 
 #include <sdbusplus/asio/object_server.hpp>
 
+#include <cmath>
+#include <math.h>
 #include <fstream>
 #include <iostream>
 #include <stdexcept>
@@ -78,8 +80,8 @@ PwmSensor::PwmSensor(const std::string& name, const std::string& sysPath,
 
         double reqValue = (req / 100.0) * pwmMax;
         double respValue = (resp / 100.0) * pwmMax;
-        auto reqInt = static_cast<uint32_t>(std::round(reqValue));
-        auto respInt = static_cast<uint32_t>(std::round(respValue));
+        auto reqInt = static_cast<uint32_t>(round(reqValue));
+        auto respInt = static_cast<uint32_t>(round(respValue));
         // Avoid floating-point equality, compare as integers
         if (reqInt == respInt)
         {
@@ -94,7 +96,7 @@ PwmSensor::PwmSensor(const std::string& name, const std::string& sysPath,
         },
         [this](double& curVal) {
         double currScaled = (curVal / 100.0) * pwmMax;
-        auto currInt = static_cast<uint32_t>(std::round(currScaled));
+        auto currInt = static_cast<uint32_t>(round(currScaled));
         auto getInt = getValue();
         // Avoid floating-point equality, compare as integers
         if (currInt != getInt)
@@ -127,7 +129,7 @@ PwmSensor::PwmSensor(const std::string& name, const std::string& sysPath,
             return 1;
         }
         auto scaledValue = static_cast<double>(req) / targetIfaceMax;
-        auto roundValue = std::round(scaledValue * pwmMax);
+        auto roundValue = round(scaledValue * pwmMax);
         setValue(static_cast<uint32_t>(roundValue));
         resp = req;
 
@@ -138,7 +140,7 @@ PwmSensor::PwmSensor(const std::string& name, const std::string& sysPath,
         [this](uint64_t& curVal) {
         auto getInt = getValue();
         auto scaledValue = static_cast<double>(getInt) / pwmMax;
-        auto roundValue = std::round(scaledValue * targetIfaceMax);
+        auto roundValue = round(scaledValue * targetIfaceMax);
         auto value = static_cast<uint64_t>(roundValue);
         if (curVal != value)
         {

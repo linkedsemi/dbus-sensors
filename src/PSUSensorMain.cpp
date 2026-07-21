@@ -40,6 +40,14 @@
 #include <variant>
 #include <vector>
 
+#ifdef __ZEPHYR__
+#include <dbus_broker.h>
+#include <printk_thread.h>
+#include <zephyr/kernel.h>
+
+extern struct k_sem psu_sensor_ready_sem;
+#endif /* __ZEPHYR__ */
+
 static constexpr bool debug = false;
 
 static const I2CDeviceTypeMap sensorTypes{
@@ -1072,10 +1080,26 @@ void propertyInitialize(void)
                          {"fan4", {"fan4_alarm", "fan4_fault"}}}}};
 }
 
+#ifdef __ZEPHYR__
+int psu_sensor_main()
+#else
 int main()
+#endif
 {
     boost::asio::io_context io;
+#ifdef __ZEPHYR__
+    printk_thread(">>> psu_sensor_main");
+    sd_bus* bus = nullptr;
+    int rc = connect_to_dbroker(&bus);
+    if (rc < 0)
+    {
+        printk_thread("Failed to connect to dbroker: %d", rc);
+        return rc;
+    }
+    auto systemBus = std::make_shared<sdbusplus::asio::connection>(io, bus);
+#else
     auto systemBus = std::make_shared<sdbusplus::asio::connection>(io);
+#endif
 
     sdbusplus::asio::object_server objectServer(systemBus, true);
     objectServer.add_manager("/xyz/openbmc_project/sensors");
@@ -1177,5 +1201,10 @@ int main()
         cpuPresenceHandler));
 
     setupManufacturingModeMatch(*systemBus);
+
+#ifdef __ZEPHYR__
+    k_sem_give(&psu_sensor_ready_sem);
+#endif
+
     io.run();
 }

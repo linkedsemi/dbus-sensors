@@ -17,6 +17,9 @@
 #include "PSUSensor.hpp"
 
 #include <unistd.h>
+#ifdef __ZEPHYR__
+#include <fcntl.h>
+#endif
 
 #include <boost/asio/random_access_file.hpp>
 #include <boost/asio/read_until.hpp>
@@ -48,10 +51,21 @@ PSUSensor::PSUSensor(const std::string& path, const std::string& objectType,
     Sensor(escapeName(sensorName), std::move(thresholdsIn), sensorConfiguration,
            objectType, false, false, max, min, conn, powerState),
     objServer(objectServer),
+#ifdef __ZEPHYR__
+    inputDev(io),
+#else
     inputDev(io, path, boost::asio::random_access_file::read_only),
+#endif
     waitTimer(io), path(path), sensorFactor(factor), sensorOffset(offset),
     thresholdTimer(io)
 {
+#ifdef __ZEPHYR__
+    int fd = open(path.c_str(), O_RDONLY);
+    if (fd >= 0)
+    {
+        inputDev.assign(fd);
+    }
+#endif
     buffer = std::make_shared<std::array<char, 128>>();
     std::string unitPath = sensor_paths::getPathForUnits(sensorUnits);
     if constexpr (debug)
@@ -129,8 +143,13 @@ void PSUSensor::setupRead(void)
     // the actual data structure, so that we can always append the null
     // terminator.  This can go away once std::from_chars<double> is available
     // in the standard
+#ifdef __ZEPHYR__
+    inputDev.async_read_some(
+        boost::asio::buffer(buffer->data(), buffer->size() - 1),
+#else
     inputDev.async_read_some_at(
         0, boost::asio::buffer(buffer->data(), buffer->size() - 1),
+#endif
         [weak, buffer{buffer}](const boost::system::error_code& ec,
                                size_t bytesRead) {
         std::shared_ptr<PSUSensor> self = weak.lock();
@@ -191,6 +210,25 @@ void PSUSensor::handleResponse(const boost::system::error_code& err,
         std::cerr << "Could not parse  input from " << path << "\n";
         incrementError();
     }
+
+#ifdef __ZEPHYR__
+    /* Zephyr devfs sysfs attributes return the value once per open (ppos),
+     * then EOF; async_read_some does not reset ppos. Reopen the fd each poll
+     * so every read gets a fresh value (mirrors HwmonTempSensor / ADCSensor).
+     * Without this, only the first poll returns data; later polls read EOF
+     * -> parse fails -> Value=nan. */
+    inputDev.close();
+    int fd = open(path.c_str(), O_RDONLY);
+    if (fd >= 0)
+    {
+        inputDev.assign(fd);
+    }
+    else
+    {
+        std::cerr << "PSU sensor " << name << " failed to reopen " << path
+                  << "\n";
+    }
+#endif
 
     restartRead();
 }

@@ -18,6 +18,9 @@
 
 #include "SensorPaths.hpp"
 
+#ifdef __ZEPHYR__
+#include <fcntl.h>
+#endif
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/read_until.hpp>
 #include <boost/container/flat_map.hpp>
@@ -150,10 +153,21 @@ PSUSubEvent::PSUSubEvent(
     assertState(std::move(state)), path(path), eventName(eventName),
     readState(powerState), waitTimer(io),
 
+#ifdef __ZEPHYR__
+    inputDev(io),
+#else
     inputDev(io, path, boost::asio::random_access_file::read_only),
+#endif
     psuName(psuName), groupEventName(groupEventName), systemBus(conn)
 {
     buffer = std::make_shared<std::array<char, 128>>();
+#ifdef __ZEPHYR__
+    int eventFd = open(path.c_str(), O_RDONLY);
+    if (eventFd >= 0)
+    {
+        inputDev.assign(eventFd);
+    }
+#endif
     if (pollRate > 0.0)
     {
         eventPollMs = static_cast<unsigned int>(pollRate * 1000);
@@ -205,8 +219,13 @@ void PSUSubEvent::setupRead(void)
     }
 
     std::weak_ptr<PSUSubEvent> weakRef = weak_from_this();
+#ifdef __ZEPHYR__
+    inputDev.async_read_some(
+        boost::asio::buffer(buffer->data(), buffer->size() - 1),
+#else
     inputDev.async_read_some_at(
         0, boost::asio::buffer(buffer->data(), buffer->size() - 1),
+#endif
         [weakRef, buffer{buffer}](const boost::system::error_code& ec,
                                   std::size_t bytesTransferred) {
         std::shared_ptr<PSUSubEvent> self = weakRef.lock();
@@ -283,6 +302,16 @@ void PSUSubEvent::handleResponse(const boost::system::error_code& err,
         updateValue(0);
         errCount++;
     }
+#ifdef __ZEPHYR__
+    /* devfs sysfs attrs return the value once per open (ppos) then EOF;
+     * reopen each poll so every read gets a fresh value. */
+    inputDev.close();
+    int eventFd = open(path.c_str(), O_RDONLY);
+    if (eventFd >= 0)
+    {
+        inputDev.assign(eventFd);
+    }
+#endif
     restartRead();
 }
 

@@ -41,10 +41,10 @@ if(CONFIG_OPENBMC_DBUS_SENSORS)
             #${ZEPHYR_CURRENT_MODULE_DIR}/src/NVMeBasicContext.cpp
             #${ZEPHYR_CURRENT_MODULE_DIR}/src/NVMeSensor.cpp
             #${ZEPHYR_CURRENT_MODULE_DIR}/src/NVMeSensorMain.cpp
-            # ${ZEPHYR_CURRENT_MODULE_DIR}/src/PSUEvent.cpp
-            # ${ZEPHYR_CURRENT_MODULE_DIR}/src/PSUSensor.cpp
-            # ${ZEPHYR_CURRENT_MODULE_DIR}/src/PSUSensorMain.cpp
-            # ${ZEPHYR_CURRENT_MODULE_DIR}/src/PwmSensor.cpp
+            ${ZEPHYR_CURRENT_MODULE_DIR}/src/PSUEvent.cpp
+            ${ZEPHYR_CURRENT_MODULE_DIR}/src/PSUSensor.cpp
+            ${ZEPHYR_CURRENT_MODULE_DIR}/src/PSUSensorMain.cpp
+            ${ZEPHYR_CURRENT_MODULE_DIR}/src/PwmSensor.cpp
             # ${ZEPHYR_CURRENT_MODULE_DIR}/src/SensorPaths.cpp
             # ${ZEPHYR_CURRENT_MODULE_DIR}/src/TachSensor.cpp
             # ${ZEPHYR_CURRENT_MODULE_DIR}/src/Thresholds.cpp

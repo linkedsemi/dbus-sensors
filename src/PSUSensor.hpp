@@ -4,7 +4,14 @@
 #include "Thresholds.hpp"
 #include "sensor.hpp"
 
+#ifdef __ZEPHYR__
+/* boost::asio::random_access_file requires BOOST_ASIO_HAS_FILE (Windows-only);
+ * on Zephyr (POSIX) use posix::stream_descriptor + async_read_some + per-poll
+ * reopen, exactly like HwmonTempSensor (devfs sysfs attrs are once-per-open). */
+#include <boost/asio/posix/stream_descriptor.hpp>
+#else
 #include <boost/asio/random_access_file.hpp>
+#endif
 #include <sdbusplus/asio/object_server.hpp>
 
 #include <array>
@@ -33,7 +40,11 @@ class PSUSensor : public Sensor, public std::enable_shared_from_this<PSUSensor>
     // while in the middle of a read operation
     std::shared_ptr<std::array<char, 128>> buffer;
     sdbusplus::asio::object_server& objServer;
+#ifdef __ZEPHYR__
+    boost::asio::posix::stream_descriptor inputDev;
+#else
     boost::asio::random_access_file inputDev;
+#endif
     boost::asio::steady_timer waitTimer;
     std::string path;
     unsigned int sensorFactor;

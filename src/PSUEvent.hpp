@@ -19,7 +19,13 @@
 #include "Utils.hpp"
 
 #include <boost/asio/io_context.hpp>
+#ifdef __ZEPHYR__
+/* boost::asio::random_access_file requires BOOST_ASIO_HAS_FILE (Windows-only);
+ * on Zephyr (POSIX) use posix::stream_descriptor, like PSUSensor / HwmonTemp. */
+#include <boost/asio/posix/stream_descriptor.hpp>
+#else
 #include <boost/asio/random_access_file.hpp>
+#endif
 #include <boost/asio/steady_timer.hpp>
 #include <boost/container/flat_map.hpp>
 #include <sdbusplus/asio/object_server.hpp>
@@ -63,7 +69,11 @@ class PSUSubEvent : public std::enable_shared_from_this<PSUSubEvent>
     void handleResponse(const boost::system::error_code& err,
                         size_t bytesTransferred);
     void updateValue(const int& newValue);
+#ifdef __ZEPHYR__
+    boost::asio::posix::stream_descriptor inputDev;
+#else
     boost::asio::random_access_file inputDev;
+#endif
     std::string psuName;
     std::string groupEventName;
     std::string fanName;
