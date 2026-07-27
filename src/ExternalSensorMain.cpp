@@ -32,7 +32,7 @@ extern struct k_sem external_sensor_ready_sem;
 
 /* Enable a built-in self-test that emulates an external writer (see below).
  * Set to 0 to disable. */
-#define EXTERNAL_SENSOR_SELFTEST 1
+#define EXTERNAL_SENSOR_SELFTEST 0
 #endif
 
 // Copied from HwmonTempSensor and inspired by
@@ -376,12 +376,31 @@ static void externalSensorSelfTest(
     auto step = std::make_shared<int>(0);
     auto tick = std::make_shared<std::function<void()>>();
 
+    // Open a SEPARATE broker connection for the write exercise. Calling
+    // "xyz.openbmc_project.ExternalSensor" (a name THIS connection owns)
+    // through the broker is a self-call that hangs the single-threaded
+    // dbroker and freezes every other broker-dependent thread. A distinct
+    // source connection avoids the self-call while still exercising the
+    // D-Bus write path end-to-end.
+    sd_bus* testBus = nullptr;
+    int testRc = connect_to_dbroker(&testBus);
+    std::shared_ptr<sdbusplus::asio::connection> testConn;
+    if (testRc == 0 && testBus != nullptr)
+    {
+        testConn = std::make_shared<sdbusplus::asio::connection>(io, testBus);
+    }
+    else
+    {
+        printk_thread("self-test: cannot open separate test bus (%d), "
+                      "skipping broker write exercise", testRc);
+    }
+
     // Phase A: wait a single time for entity-manager to publish the
     // ExternalSensor config (its 5s debounce + ~1s processing).
     // If sensors still empty after that, fallback creates its own sensor.
 
     *tick = [timer, waitedOnce, remaining, step, &bus, &objectServer,
-             &sensors, tick]() {
+             &sensors, tick, testConn]() {
         // Phase A: single delay for entity-manager.
         if (sensors.empty() && !*waitedOnce)
         {
@@ -426,7 +445,14 @@ static void externalSensorSelfTest(
             std::shared_ptr<ExternalSensor>& sensor = kv.second;
             std::string path = sensor->sensorInterface->get_object_path();
 
-            bus->async_method_call(
+            if (!testConn)
+            {
+                printk_thread("self-test: no test bus, skipping write of %s",
+                              name.c_str());
+                continue;
+            }
+
+            testConn->async_method_call(
                 [name, value](boost::system::error_code ec) {
                     if (ec)
                     {
@@ -479,6 +505,8 @@ static void externalSensorSelfTest(
     timer->async_wait([timer, tick](boost::system::error_code) {
         (*tick)();
     });
+
+    disconnect_from_dbroker(testBus);
 }
 #endif /* EXTERNAL_SENSOR_SELFTEST */
 
