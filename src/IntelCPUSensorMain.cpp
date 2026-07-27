@@ -41,6 +41,13 @@
 #include <variant>
 #include <vector>
 
+#ifdef __ZEPHYR__
+#include <dbus_broker.h>
+#include <zephyr/kernel.h>
+
+extern struct k_sem intel_cpu_sensor_ready_sem;
+#endif
+
 // clang-format off
 // this needs to be included last or we'll have build issues
 #include <linux/peci-ioctl.h>
@@ -704,10 +711,23 @@ bool getCpuConfig(const std::shared_ptr<sdbusplus::asio::connection>& systemBus,
     return false;
 }
 
+#ifdef __ZEPHYR__
+int intel_cpu_sensor_main()
+#else
 int main()
+#endif
 {
     boost::asio::io_context io;
+#ifdef __ZEPHYR__
+    sd_bus* bus = nullptr;
+    if (connect_to_dbroker(&bus) < 0 || !bus)
+    {
+        return -1;
+    }
+    auto systemBus = std::make_shared<sdbusplus::asio::connection>(io, bus);
+#else
     auto systemBus = std::make_shared<sdbusplus::asio::connection>(io);
+#endif
     boost::container::flat_set<CPUConfig> cpuConfigs;
 
     sdbusplus::asio::object_server objectServer(systemBus, true);
@@ -767,6 +787,9 @@ int main()
     systemBus->request_name("xyz.openbmc_project.IntelCPUSensor");
 
     setupManufacturingModeMatch(*systemBus);
+#ifdef __ZEPHYR__
+    k_sem_give(&intel_cpu_sensor_ready_sem);
+#endif
     io.run();
     return 0;
 }

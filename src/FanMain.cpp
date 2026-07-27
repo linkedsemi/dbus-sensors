@@ -38,6 +38,13 @@
 #include <variant>
 #include <vector>
 
+#ifdef __ZEPHYR__
+#include <dbus_broker.h>
+#include <zephyr/kernel.h>
+
+extern struct k_sem fan_sensor_ready_sem;
+#endif
+
 namespace fs = std::filesystem;
 
 // The following two structures need to be consistent
@@ -59,6 +66,9 @@ static_assert(std::tuple_size<decltype(sensorTypes)>::value == FanTypes::max,
 constexpr const char* redundancyConfiguration =
     "xyz.openbmc_project.Configuration.FanRedundancy";
 static std::regex inputRegex(R"(fan(\d+)_input)");
+#ifdef __ZEPHYR__
+static std::regex inputRegex1(R"(hwmon(\d+)/fan1_input)");
+#endif
 
 // todo: power supply fan redundancy
 std::optional<RedundancySensor> systemRedundancy;
@@ -563,10 +573,23 @@ void createSensors(
         retries);
 }
 
+#ifdef __ZEPHYR__
+int fan_sensor_main()
+#else
 int main()
+#endif
 {
     boost::asio::io_context io;
+#ifdef __ZEPHYR__
+    sd_bus* bus = nullptr;
+    if (connect_to_dbroker(&bus) < 0 || !bus)
+    {
+        return -1;
+    }
+    auto systemBus = std::make_shared<sdbusplus::asio::connection>(io, bus);
+#else
     auto systemBus = std::make_shared<sdbusplus::asio::connection>(io);
+#endif
     sdbusplus::asio::object_server objectServer(systemBus, true);
 
     objectServer.add_manager("/xyz/openbmc_project/sensors");
@@ -630,6 +653,9 @@ int main()
     matches.emplace_back(std::move(match));
 
     setupManufacturingModeMatch(*systemBus);
+#ifdef __ZEPHYR__
+    k_sem_give(&fan_sensor_ready_sem);
+#endif
     io.run();
     return 0;
 }

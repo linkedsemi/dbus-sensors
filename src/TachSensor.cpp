@@ -55,9 +55,23 @@ TachSensor::TachSensor(const std::string& path, const std::string& objectType,
            powerState),
     objServer(objectServer), redundancy(redundancy),
     presence(std::move(presenceSensor)),
+#ifdef __ZEPHYR__
+    inputDev(io),
+#else
     inputDev(io, path, boost::asio::random_access_file::read_only),
+#endif
     waitTimer(io), path(path), led(ledIn)
 {
+#ifdef __ZEPHYR__
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg)
+    int fd = open(path.c_str(), O_RDONLY);
+    if (fd < 0)
+    {
+        std::cerr << "Tach sensor failed to open file\n";
+    }
+    inputDev.assign(fd);
+#endif
+
     sensorInterface = objectServer.add_interface(
         "/xyz/openbmc_project/sensors/fan_tach/" + name,
         "xyz.openbmc_project.Sensor.Value");
@@ -111,6 +125,13 @@ TachSensor::~TachSensor()
 
 void TachSensor::setupRead()
 {
+#ifdef __ZEPHYR__
+    boost::asio::async_read_until(inputDev, readBuf, '\n',
+                                  [&](const boost::system::error_code& ec,
+                                      std::size_t /*bytes_transfered*/) {
+        handleResponse(ec);
+    });
+#else
     std::weak_ptr<TachSensor> weakRef = weak_from_this();
     inputDev.async_read_some_at(
         0, boost::asio::buffer(readBuf),
@@ -121,6 +142,7 @@ void TachSensor::setupRead()
             self->handleResponse(ec, bytesRead);
         }
         });
+#endif
 }
 
 void TachSensor::restartRead(size_t pollTime)
@@ -141,6 +163,115 @@ void TachSensor::restartRead(size_t pollTime)
     });
 }
 
+#ifdef __ZEPHYR__
+void TachSensor::handleResponse(const boost::system::error_code& err)
+{
+    // if ((err == boost::system::errc::bad_file_descriptor) ||
+    //     (err == boost::asio::error::misc_errors::not_found))
+    // {
+    //     std::cerr << "TachSensor " << name << " removed " << path << "\n";
+    //     return; // we're being destroyed
+    // }
+    // bool missing = false;
+    // size_t pollTime = pwmPollMs;
+    // if (presence)
+    // {
+    //     if (!presence->getValue())
+    //     {
+    //         markAvailable(false);
+    //         missing = true;
+    //         pollTime = sensorFailedPollTimeMs;
+    //     }
+    //     itemIface->set_property("Present", !missing);
+    // }
+
+    // if (!missing)
+    // {
+    //     if (!err)
+    //     {
+    //         const char* bufEnd = readBuf.data() + bytesRead;
+    //         int nvalue = 0;
+    //         std::from_chars_result ret =
+    //             std::from_chars(readBuf.data(), bufEnd, nvalue);
+    //         if (ret.ec != std::errc())
+    //         {
+    //             incrementError();
+    //             pollTime = sensorFailedPollTimeMs;
+    //         }
+    //         else
+    //         {
+    //             updateValue(nvalue);
+    //         }
+    //     }
+    //     else
+    //     {
+    //         incrementError();
+    //         pollTime = sensorFailedPollTimeMs;
+    //     }
+    // }
+
+    // restartRead(pollTime);
+    if (err == boost::system::errc::bad_file_descriptor)
+    {
+        return; // we're being destroyed
+    }
+    bool missing = false;
+    size_t pollTime = pwmPollMs;
+    if (presence)
+    {
+        if (!presence->getValue())
+        {
+            markAvailable(false);
+            missing = true;
+            pollTime = sensorFailedPollTimeMs;
+        }
+        itemIface->set_property("Present", !missing);
+    }
+    std::istream responseStream(&readBuf);
+    if (!missing)
+    {
+        if (!err)
+        {
+            std::string response;
+            try
+            {
+                std::getline(responseStream, response);
+                rawValue = std::stod(response);
+                responseStream.clear();
+                updateValue(rawValue);
+            }
+            catch (const std::invalid_argument&)
+            {
+                incrementError();
+                pollTime = sensorFailedPollTimeMs;
+            }
+        }
+        else
+        {
+            incrementError();
+            pollTime = sensorFailedPollTimeMs;
+        }
+    }
+    responseStream.clear();
+    inputDev.close();
+
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg)
+    int fd = open(path.c_str(), O_RDONLY);
+    if (fd < 0)
+    {
+        return; // we're no longer valid
+    }
+    inputDev.assign(fd);
+    waitTimer.expires_from_now(std::chrono::milliseconds(pollTime));
+    waitTimer.async_wait([&](const boost::system::error_code& ec) {
+        if (ec == boost::asio::error::operation_aborted)
+        {
+            return; // we're being canceled
+        }
+        setupRead();
+    });
+}
+#else
 void TachSensor::handleResponse(const boost::system::error_code& err,
                                 size_t bytesRead)
 {
@@ -190,6 +321,7 @@ void TachSensor::handleResponse(const boost::system::error_code& err,
 
     restartRead(pollTime);
 }
+#endif
 
 void TachSensor::checkThresholds(void)
 {

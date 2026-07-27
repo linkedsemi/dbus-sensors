@@ -41,6 +41,13 @@
 #include <utility>
 #include <vector>
 
+#ifdef __ZEPHYR__
+#include <dbus_broker.h>
+#include <zephyr/kernel.h>
+
+extern struct k_sem intrusion_sensor_ready_sem;
+#endif
+
 static constexpr bool debug = false;
 
 static constexpr const char* sensorType = "ChassisIntrusionSensor";
@@ -409,7 +416,11 @@ static bool initializeLanStatus(
     return true;
 }
 
+#ifdef __ZEPHYR__
+int intrusion_sensor_main()
+#else
 int main()
+#endif
 {
     int busId = -1;
     int slaveAddr = -1;
@@ -418,7 +429,16 @@ int main()
 
     // setup connection to dbus
     boost::asio::io_context io;
+#ifdef __ZEPHYR__
+    sd_bus* bus = nullptr;
+    if (connect_to_dbroker(&bus) < 0 || !bus)
+    {
+        return -1;
+    }
+    auto systemBus = std::make_shared<sdbusplus::asio::connection>(io, bus);
+#else
     auto systemBus = std::make_shared<sdbusplus::asio::connection>(io);
+#endif
 
     // setup object server, define interface
     systemBus->request_name("xyz.openbmc_project.IntrusionSensor");
@@ -486,6 +506,9 @@ int main()
             });
     }
 
+#ifdef __ZEPHYR__
+    k_sem_give(&intrusion_sensor_ready_sem);
+#endif
     io.run();
 
     return 0;

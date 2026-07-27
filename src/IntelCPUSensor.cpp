@@ -253,7 +253,11 @@ void IntelCPUSensor::handleResponse(const boost::system::error_code& err)
 
     if (fd >= 0)
     {
+#ifdef __ZEPHYR__
+        rdLen = read(fd, response.data(), bufLen);
+#else
         rdLen = pread(fd, response.data(), bufLen, 0);
+#endif
     }
 
     if (rdLen > 0)

@@ -3,7 +3,11 @@
 #include "Thresholds.hpp"
 #include "sensor.hpp"
 
+#ifdef __ZEPHYR__
+#include <boost/asio/streambuf.hpp>
+#else
 #include <boost/asio/random_access_file.hpp>
+#endif
 #include <boost/container/flat_map.hpp>
 #include <boost/container/flat_set.hpp>
 #include <gpiod.hpp>
@@ -82,19 +86,31 @@ class TachSensor :
   private:
     // Ordering is important here; readBuf is first so that it's not destroyed
     // while async operations from other member fields might still be using it.
+#ifdef __ZEPHYR__
+    boost::asio::streambuf readBuf;
+#else
     std::array<char, 128> readBuf{};
+#endif
     sdbusplus::asio::object_server& objServer;
     std::optional<RedundancySensor>* redundancy;
     std::unique_ptr<PresenceSensor> presence;
     std::shared_ptr<sdbusplus::asio::dbus_interface> itemIface;
     std::shared_ptr<sdbusplus::asio::dbus_interface> itemAssoc;
+#ifdef __ZEPHYR__
+    boost::asio::posix::stream_descriptor inputDev;
+#else
     boost::asio::random_access_file inputDev;
+#endif
     boost::asio::steady_timer waitTimer;
     std::string path;
     std::optional<std::string> led;
     bool ledState = false;
 
+#ifdef __ZEPHYR__
+    void handleResponse(const boost::system::error_code& err);
+#else
     void handleResponse(const boost::system::error_code& err, size_t bytesRead);
+#endif
     void restartRead(size_t pollTime);
     void checkThresholds(void) override;
 };
