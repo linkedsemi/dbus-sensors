@@ -23,7 +23,7 @@ if(CONFIG_OPENBMC_DBUS_SENSORS)
     zephyr_library_sources(
             ${ZEPHYR_CURRENT_MODULE_DIR}/src/ADCSensor.cpp
             ${ZEPHYR_CURRENT_MODULE_DIR}/src/ADCSensorMain.cpp
-            # ${ZEPHYR_CURRENT_MODULE_DIR}/src/ChassisIntrusionSensor.cpp
+            ${ZEPHYR_CURRENT_MODULE_DIR}/src/ChassisIntrusionSensor.cpp
             # ${ZEPHYR_CURRENT_MODULE_DIR}/src/DeviceMgmt.cpp
             # #${ZEPHYR_CURRENT_MODULE_DIR}/src/ExitAirTempSensor.cpp
             ${ZEPHYR_CURRENT_MODULE_DIR}/src/ExternalSensor.cpp
@@ -34,7 +34,7 @@ if(CONFIG_OPENBMC_DBUS_SENSORS)
             ${ZEPHYR_CURRENT_MODULE_DIR}/src/HwmonTempMain.cpp
             # ${ZEPHYR_CURRENT_MODULE_DIR}/src/IntelCPUSensor.cpp
             # ${ZEPHYR_CURRENT_MODULE_DIR}/src/IntelCPUSensorMain.cpp
-            # ${ZEPHYR_CURRENT_MODULE_DIR}/src/IntrusionSensorMain.cpp
+            ${ZEPHYR_CURRENT_MODULE_DIR}/src/IntrusionSensorMain.cpp
             #${ZEPHYR_CURRENT_MODULE_DIR}/src/IpmbSDRSensor.cpp
             #${ZEPHYR_CURRENT_MODULE_DIR}/src/IpmbSensor.cpp
             #${ZEPHYR_CURRENT_MODULE_DIR}/src/MCUTempSensor.cpp

@@ -48,11 +48,12 @@ const static constexpr size_t pchStatusRegIntrusion = 0x04;
 // Status bit field masks
 const static constexpr size_t pchRegMaskIntrusion = 0x01;
 
-void ChassisIntrusionSensor::updateValue(const std::string& newValue)
+void ChassisIntrusionSensor::updateValue(const std::string& newValue,
+                                         uint8_t chMask)
 {
     // Take no action if value already equal
     // Same semantics as Sensor::updateValue(const double&)
-    if (newValue == mValue)
+    if ((newValue == mValue) && (mValue == "Normal"))
     {
         return;
     }
@@ -64,12 +65,23 @@ void ChassisIntrusionSensor::updateValue(const std::string& newValue)
 
     mValue = newValue;
 
+    // std::cout << "mValue: " << mValue << std::endl;
+    // std::cout << "mOldValue: " << mOldValue << std::endl;
+    // std::cout << "mLastChMask: 0x" << std::hex << static_cast<unsigned int>(mLastChMask) << std::endl;
+    // std::cout << "chMask: 0x" << std::hex << static_cast<unsigned int>(chMask) << std::endl;
+    // std::cout << "chMask^mLastChMask: 0x" << std::hex << static_cast<unsigned int>(chMask ^ mLastChMask) << std::endl;
+
     if (mOldValue == "Normal" && mValue != "Normal")
     {
-        sd_journal_send("MESSAGE=%s", "Chassis intrusion assert event",
-                        "PRIORITY=%i", LOG_INFO, "REDFISH_MESSAGE_ID=%s",
+        char msg[96];
+        snprintf(msg, sizeof(msg),
+                 "Chassis intrusion assert event (channel mask: 0x%02x)",
+                 static_cast<unsigned int>(chMask));
+        sd_journal_send("MESSAGE=%s", msg, "PRIORITY=%i", LOG_INFO,
+                        "REDFISH_MESSAGE_ID=%s",
                         "OpenBMC.0.1.ChassisIntrusionDetected", NULL);
         mOldValue = mValue;
+        mLastChMask = chMask;
     }
     else if (mOldValue != "Normal" && mValue == "Normal")
     {
@@ -77,6 +89,24 @@ void ChassisIntrusionSensor::updateValue(const std::string& newValue)
                         "PRIORITY=%i", LOG_INFO, "REDFISH_MESSAGE_ID=%s",
                         "OpenBMC.0.1.ChassisIntrusionReset", NULL);
         mOldValue = mValue;
+        mLastChMask = chMask;
+    }
+    else if (mOldValue != "Normal" && mValue != "Normal" &&
+             (chMask ^ mLastChMask) != 0)
+    {
+        char msg[96];
+        snprintf(msg, sizeof(msg),
+                 "Chassis intrusion additional channel assert (channel mask: "
+                 "0x%02x, new: 0x%02x)",
+                 static_cast<unsigned int>(chMask),
+                 static_cast<unsigned int>(chMask & ~mLastChMask));
+        sd_journal_send("MESSAGE=%s", msg, "PRIORITY=%i", LOG_INFO,
+                        "REDFISH_MESSAGE_ID=%s",
+                        "OpenBMC.0.1.ChassisIntrusionDetected", NULL);
+        mLastChMask |= chMask;
+        std::cout << "Chassis intrusion additional channel assert (channel mask: "
+                  << "0x" << std::hex << static_cast<unsigned int>(chMask)
+                  << ")\n";
     }
 }
 
@@ -179,6 +209,119 @@ void ChassisIntrusionSensor::pollSensorStatusByPch()
     });
 }
 
+int ChassisIntrusionSensor::hwmonRead()
+{
+    int fd = open(mHwmonPath.c_str(), O_RDONLY | O_CLOEXEC);
+    if (fd < 0)
+    {
+        std::cerr << "ChassisIntrusionSensor unable to open " << mHwmonPath
+                  << "\n";
+        return -1;
+    }
+
+    char buf[32];
+    ssize_t n = read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+    if (n <= 0)
+    {
+        std::cerr << "ChassisIntrusionSensor failed to read " << mHwmonPath
+                  << "\n";
+        return -1;
+    }
+    buf[n] = '\0';
+
+    int value = 0;
+    try
+    {
+        value = std::stoi(buf);
+    }
+    catch (const std::exception&)
+    {
+        std::cerr << "ChassisIntrusionSensor invalid value in " << mHwmonPath
+                  << "\n";
+        return -1;
+    }
+
+    if (debug)
+    {
+        std::cout << "hwmon " << mHwmonPath << " value = " << value << "\n";
+    }
+    return value;
+}
+
+void ChassisIntrusionSensor::pollSensorStatusByHwmon()
+{
+    mPollTimer.expires_after(std::chrono::seconds(intrusionSensorPollSec));
+
+    mPollTimer.async_wait([this](const boost::system::error_code& ec) {
+        if (!ec)
+        {
+            int statusValue = hwmonRead();
+            if (statusValue >= 0)
+            {
+                std::string newValue =
+                    statusValue != 0 ? "HardwareIntrusion" : "Normal";
+
+                if (newValue != "unknown" /*&& mValue != newValue*/)
+                {
+                    // std::cout << "update value from " << mValue << " to "
+                    //           << newValue << " (channel mask: 0x"
+                    //           << std::hex << (statusValue & 0xff) << std::dec
+                    //           << ")\n";
+                    updateValue(newValue, static_cast<uint8_t>(statusValue));
+                }
+            }
+
+            pollSensorStatusByHwmon();
+        }
+        else if (ec == boost::asio::error::operation_aborted)
+        {
+            std::cerr << "Timer of intrusion sensor is cancelled. Return \n";
+            return;
+        }
+    });
+}
+
+int ChassisIntrusionSensor::hwmonRearm()
+{
+    if (mHwmonPath.empty())
+    {
+        std::cerr << "ChassisIntrusionSensor hwmon path empty, cannot rearm\n";
+        return -1;
+    }
+
+    std::string rearmPath = mHwmonPath;
+    size_t slash = rearmPath.find_last_of('/');
+    if (slash != std::string::npos)
+    {
+        rearmPath.replace(slash + 1, std::string::npos, "rearm");
+    }
+    else
+    {
+        rearmPath = "rearm";
+    }
+
+    int fd = open(rearmPath.c_str(), O_WRONLY | O_CLOEXEC);
+    if (fd < 0)
+    {
+        std::cerr << "ChassisIntrusionSensor unable to open " << rearmPath
+                  << "\n";
+        return -1;
+    }
+
+    ssize_t n = write(fd, "1\n", 2);
+    close(fd);
+    if (n < 0)
+    {
+        std::cerr << "ChassisIntrusionSensor failed to rearm " << rearmPath
+                  << "\n";
+        return -1;
+    }
+
+    std::cout << "ChassisIntrusionSensor rearmed via " << rearmPath << "\n";
+    return 0;
+}
+
 void ChassisIntrusionSensor::readGpio()
 {
     mGpioLine.event_read();
@@ -266,8 +409,26 @@ int ChassisIntrusionSensor::setSensorValue(const std::string& req,
 {
     if (!mInternalSet)
     {
-        propertyValue = req;
-        mOverridenState = true;
+        /* For hwmon intrusion sensors, setting Status to Normal means the
+         * caller wants to clear the sticky hardware latch (rearm). Perform
+         * the real rearm and let subsequent polls update the property. */
+        if (mType == IntrusionSensorType::hwmon && req == "Normal")
+        {
+            if (hwmonRearm() == 0)
+            {
+                propertyValue = req;
+                mOverridenState = false;
+            }
+            else
+            {
+                propertyValue = mValue;
+            }
+        }
+        else
+        {
+            propertyValue = req;
+            mOverridenState = true;
+        }
     }
     else if (!mOverridenState)
     {
@@ -277,7 +438,8 @@ int ChassisIntrusionSensor::setSensorValue(const std::string& req,
 }
 
 void ChassisIntrusionSensor::start(IntrusionSensorType type, int busId,
-                                   int slaveAddr, bool gpioInverted)
+                                   int slaveAddr, bool gpioInverted,
+                                   const std::string& hwmonPath)
 {
     if (debug)
     {
@@ -293,11 +455,17 @@ void ChassisIntrusionSensor::start(IntrusionSensorType type, int busId,
             std::cerr << "gpio pinName = " << mPinName
                       << ", gpioInverted = " << gpioInverted << "\n";
         }
+        else if (type == IntrusionSensorType::hwmon)
+        {
+            std::cerr << "hwmon path = " << hwmonPath << "\n";
+        }
     }
 
     if ((type == IntrusionSensorType::pch && busId == mBusId &&
          slaveAddr == mSlaveAddr) ||
         (type == IntrusionSensorType::gpio && gpioInverted == mGpioInverted &&
+         mInitialized) ||
+        (type == IntrusionSensorType::hwmon && hwmonPath == mHwmonPath &&
          mInitialized))
     {
         return;
@@ -307,10 +475,26 @@ void ChassisIntrusionSensor::start(IntrusionSensorType type, int busId,
     mBusId = busId;
     mSlaveAddr = slaveAddr;
     mGpioInverted = gpioInverted;
+    mHwmonPath = hwmonPath;
 
-    if ((mType == IntrusionSensorType::pch && mBusId > 0 && mSlaveAddr > 0) ||
-        (mType == IntrusionSensorType::gpio))
+    bool valid = false;
+    if (mType == IntrusionSensorType::pch)
     {
+        valid = (mBusId > 0 && mSlaveAddr > 0);
+    }
+    else if (mType == IntrusionSensorType::gpio)
+    {
+        valid = true;
+    }
+    else if (mType == IntrusionSensorType::hwmon)
+    {
+        valid = !mHwmonPath.empty();
+    }
+
+    if (valid)
+    {
+        std::cerr << "[ChassisIntrusionSensor] starting valid config, type="
+                  << mType << "\n";
         // initialize first if not initialized before
         if (!mInitialized)
         {
@@ -339,6 +523,10 @@ void ChassisIntrusionSensor::start(IntrusionSensorType type, int busId,
             std::cerr << "Start polling intrusion sensors\n";
             pollSensorStatusByGpio();
         }
+        else if (mType == IntrusionSensorType::hwmon)
+        {
+            pollSensorStatusByHwmon();
+        }
     }
 
     // invalid para, release resource
@@ -346,7 +534,8 @@ void ChassisIntrusionSensor::start(IntrusionSensorType type, int busId,
     {
         if (mInitialized)
         {
-            if (mType == IntrusionSensorType::pch)
+            if (mType == IntrusionSensorType::pch ||
+                mType == IntrusionSensorType::hwmon)
             {
                 mPollTimer.cancel();
             }
@@ -372,7 +561,8 @@ ChassisIntrusionSensor::ChassisIntrusionSensor(
 
 ChassisIntrusionSensor::~ChassisIntrusionSensor()
 {
-    if (mType == IntrusionSensorType::pch)
+    if (mType == IntrusionSensorType::pch ||
+        mType == IntrusionSensorType::hwmon)
     {
         mPollTimer.cancel();
     }

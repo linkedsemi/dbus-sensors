@@ -59,7 +59,7 @@ namespace fs = std::filesystem;
 static bool getIntrusionSensorConfig(
     const std::shared_ptr<sdbusplus::asio::connection>& dbusConnection,
     IntrusionSensorType* pType, int* pBusId, int* pSlaveAddr,
-    bool* pGpioInverted)
+    bool* pGpioInverted, std::string* pHwmonPath)
 {
     // find matched configuration according to sensor type
     ManagedObjectType sensorConfigurations;
@@ -92,12 +92,30 @@ static bool getIntrusionSensorConfig(
 
         baseConfiguration = &(*sensorBase);
 
-        // judge class, "Gpio" or "I2C"
+        auto findName = baseConfiguration->second.find("Name");
+        if (findName != baseConfiguration->second.end())
+        {
+            try
+            {
+                std::cerr << "[IntrusionSensorMain] found config: "
+                          << std::get<std::string>(findName->second) << "\n";
+            }
+            catch (const std::bad_variant_access&)
+            {
+            }
+        }
+
+        // judge class: "Gpio", "I2C" (PCH) or "Hwmon" (Zephyr devfs)
         auto findClass = baseConfiguration->second.find("Class");
         if (findClass != baseConfiguration->second.end() &&
             std::get<std::string>(findClass->second) == "Gpio")
         {
             *pType = IntrusionSensorType::gpio;
+        }
+        else if (findClass != baseConfiguration->second.end() &&
+                 std::get<std::string>(findClass->second) == "Hwmon")
+        {
+            *pType = IntrusionSensorType::hwmon;
         }
         else
         {
@@ -167,12 +185,97 @@ static bool getIntrusionSensorConfig(
             }
             return true;
         }
+
+        // case to find Zephyr hwmon devfs info
+        if (*pType == IntrusionSensorType::hwmon)
+        {
+            auto findHwmonPath = baseConfiguration->second.find("HwmonPath");
+            if (findHwmonPath != baseConfiguration->second.end())
+            {
+                try
+                {
+                    *pHwmonPath = std::get<std::string>(findHwmonPath->second);
+                }
+                catch (const std::bad_variant_access& e)
+                {
+                    std::cerr << "invalid value for HwmonPath in config. \n";
+                    continue;
+                }
+            }
+            else
+            {
+                auto findHwmonLabel =
+                    baseConfiguration->second.find("HwmonLabel");
+                if (findHwmonLabel == baseConfiguration->second.end())
+                {
+                    std::cerr << "error finding HwmonPath or HwmonLabel in "
+                                 "configuration \n";
+                    continue;
+                }
+
+                std::string label;
+                try
+                {
+                    label = std::get<std::string>(findHwmonLabel->second);
+                }
+                catch (const std::bad_variant_access& e)
+                {
+                    std::cerr << "invalid value for HwmonLabel in config. \n";
+                    continue;
+                }
+
+                // scan /sys/class/hwmon/hwmon*/label for a match
+                bool found = false;
+                try
+                {
+                    for (const auto& entry :
+                         fs::directory_iterator("/sys/class/hwmon"))
+                    {
+                        if (!entry.is_directory())
+                        {
+                            continue;
+                        }
+                        std::ifstream labelFile(entry.path() / "label");
+                        std::string entryLabel;
+                        if (labelFile && std::getline(labelFile, entryLabel) &&
+                            entryLabel == label)
+                        {
+                            *pHwmonPath =
+                                (entry.path() / "intrusion1_input").string();
+                            found = true;
+                            break;
+                        }
+                    }
+                }
+                catch (const fs::filesystem_error& e)
+                {
+                    std::cerr << "[IntrusionSensorMain] failed to scan /sys/class/hwmon: "
+                              << e.what() << "\n";
+                    continue;
+                }
+                if (!found)
+                {
+                    std::cerr << "[IntrusionSensorMain] no hwmon device with label "
+                              << label << " found\n";
+                    continue;
+                }
+            }
+
+            std::cerr << "[IntrusionSensorMain] matched Hwmon config, path="
+                      << *pHwmonPath << "\n";
+            if (debug)
+            {
+                std::cout << "find matched hwmon path " << *pHwmonPath << "\n";
+            }
+            return true;
+        }
     }
 
-    std::cerr << "can't find matched I2C or GPIO configuration for intrusion "
-                 "sensor. \n";
+    std::cerr << "[IntrusionSensorMain] can't find matched I2C, GPIO or Hwmon "
+                 "configuration for intrusion sensor. \n";
     *pBusId = -1;
     *pSlaveAddr = -1;
+    pHwmonPath->clear();
     return false;
 }
 
@@ -425,6 +528,7 @@ int main()
     int busId = -1;
     int slaveAddr = -1;
     bool gpioInverted = false;
+    std::string hwmonPath;
     IntrusionSensorType type = IntrusionSensorType::gpio;
 
     // setup connection to dbus
@@ -454,9 +558,16 @@ int main()
     ChassisIntrusionSensor chassisIntrusionSensor(io, ifaceChassis);
 
     if (getIntrusionSensorConfig(systemBus, &type, &busId, &slaveAddr,
-                                 &gpioInverted))
+                                 &gpioInverted, &hwmonPath))
     {
-        chassisIntrusionSensor.start(type, busId, slaveAddr, gpioInverted);
+        std::cerr << "[IntrusionSensorMain] starting sensor type=" << type
+                  << " hwmonPath=" << hwmonPath << "\n";
+        chassisIntrusionSensor.start(type, busId, slaveAddr, gpioInverted,
+                                     hwmonPath);
+    }
+    else
+    {
+        std::cerr << "[IntrusionSensorMain] no config, sensor not started\n";
     }
 
     // callback to handle configuration change
@@ -470,9 +581,10 @@ int main()
 
         std::cout << "rescan due to configuration change \n";
         if (getIntrusionSensorConfig(systemBus, &type, &busId, &slaveAddr,
-                                     &gpioInverted))
+                                     &gpioInverted, &hwmonPath))
         {
-            chassisIntrusionSensor.start(type, busId, slaveAddr, gpioInverted);
+            chassisIntrusionSensor.start(type, busId, slaveAddr, gpioInverted,
+                                         hwmonPath);
         }
     };
 
