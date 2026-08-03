@@ -41,6 +41,7 @@
 #ifdef __ZEPHYR__
 #include <dbus_broker.h>
 #include <zephyr/kernel.h>
+#include <printk_thread.h>
 
 extern struct k_sem fan_sensor_ready_sem;
 #endif
@@ -83,10 +84,15 @@ static const std::map<std::string, FanTypes> compatibleFanTypes = {
 
 FanTypes getFanType(const fs::path& parentPath)
 {
+#ifdef __ZEPHYR__
+    std::string compatiblePath = (parentPath / "name").string();
+#else
     fs::path linkPath = parentPath / "of_node";
     std::string canonical = fs::canonical(linkPath);
 
     std::string compatiblePath = canonical + "/compatible";
+#endif
+
     std::ifstream compatibleStream(compatiblePath);
 
     if (!compatibleStream)
@@ -98,8 +104,10 @@ FanTypes getFanType(const fs::path& parentPath)
     std::string compatibleString;
     while (std::getline(compatibleStream, compatibleString))
     {
+#ifndef __ZEPHYR__
         compatibleString.pop_back(); // trim EOL before comparisons
 
+#endif
         std::map<std::string, FanTypes>::const_iterator compatibleIterator =
             compatibleFanTypes.find(compatibleString);
 
@@ -572,6 +580,88 @@ void createSensors(
         std::vector<std::string>{sensorTypes.begin(), sensorTypes.end()},
         retries);
 }
+#ifdef __ZEPHYR__
+
+int fan_sensor_main()
+{
+    boost::asio::io_context io;
+    sd_bus* bus = nullptr;
+    int rc = connect_to_dbroker(&bus);
+    if (rc < 0)
+    {
+        printk_thread("Failed to connect to dbroker: %d", rc);
+        return rc;
+    }
+    auto systemBus = std::make_shared<sdbusplus::asio::connection>(io, bus);
+    sdbusplus::asio::object_server objectServer(systemBus, true);
+
+    objectServer.add_manager("/xyz/openbmc_project/sensors");
+    objectServer.add_manager("/xyz/openbmc_project/control");
+    objectServer.add_manager("/xyz/openbmc_project/inventory");
+    systemBus->request_name("xyz.openbmc_project.FanSensor");
+    boost::container::flat_map<std::string, std::shared_ptr<TachSensor>>
+        tachSensors;
+    boost::container::flat_map<std::string, std::unique_ptr<PwmSensor>>
+        pwmSensors;
+    auto sensorsChanged =
+        std::make_shared<boost::container::flat_set<std::string>>();
+
+    boost::asio::post(io, [&]() {
+        createSensors(io, objectServer, tachSensors, pwmSensors, systemBus,
+                      nullptr);
+    });
+
+    boost::asio::steady_timer filterTimer(io);
+    std::function<void(sdbusplus::message_t&)> eventHandler =
+        [&](sdbusplus::message_t& message) {
+        if (message.is_method_error())
+        {
+            std::cerr << "callback method error\n";
+            return;
+        }
+        sensorsChanged->insert(message.get_path());
+        // this implicitly cancels the timer
+        filterTimer.expires_after(std::chrono::seconds(1));
+
+        filterTimer.async_wait([&](const boost::system::error_code& ec) {
+            if (ec == boost::asio::error::operation_aborted)
+            {
+                /* we were canceled*/
+                return;
+            }
+            if (ec)
+            {
+                std::cerr << "timer error\n";
+                return;
+            }
+            createSensors(io, objectServer, tachSensors, pwmSensors, systemBus,
+                          sensorsChanged, 5);
+        });
+    };
+
+    std::vector<std::unique_ptr<sdbusplus::bus::match_t>> matches =
+        setupPropertiesChangedMatches(*systemBus, sensorTypes, eventHandler);
+
+    // redundancy sensor
+    std::function<void(sdbusplus::message_t&)> redundancyHandler =
+        [&tachSensors, &systemBus, &objectServer](sdbusplus::message_t&) {
+        createRedundancySensor(tachSensors, systemBus, objectServer);
+    };
+    auto match = std::make_unique<sdbusplus::bus::match_t>(
+        static_cast<sdbusplus::bus_t&>(*systemBus),
+        "type='signal',member='PropertiesChanged',path_namespace='" +
+            std::string(inventoryPath) + "',arg0namespace='" +
+            redundancyConfiguration + "'",
+        std::move(redundancyHandler));
+    matches.emplace_back(std::move(match));
+
+    setupManufacturingModeMatch(*systemBus);
+    k_sem_give(&fan_sensor_ready_sem);
+    io.run();
+    return 0;
+}
+
+#else
 
 #ifdef __ZEPHYR__
 int fan_sensor_main()
@@ -659,3 +749,5 @@ int main()
     io.run();
     return 0;
 }
+
+#endif /* __ZEPHYR__ */

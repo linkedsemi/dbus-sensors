@@ -29,7 +29,7 @@ if(CONFIG_OPENBMC_DBUS_SENSORS)
             ${ZEPHYR_CURRENT_MODULE_DIR}/src/ExternalSensor.cpp
             ${ZEPHYR_CURRENT_MODULE_DIR}/src/ExternalSensorMain.cpp
             # ${ZEPHYR_CURRENT_MODULE_DIR}/src/FileHandle.cpp
-            # ${ZEPHYR_CURRENT_MODULE_DIR}/src/FanMain.cpp
+            ${ZEPHYR_CURRENT_MODULE_DIR}/src/FanMain.cpp
             ${ZEPHYR_CURRENT_MODULE_DIR}/src/HwmonTempSensor.cpp
             ${ZEPHYR_CURRENT_MODULE_DIR}/src/HwmonTempMain.cpp
             # ${ZEPHYR_CURRENT_MODULE_DIR}/src/IntelCPUSensor.cpp
@@ -46,7 +46,7 @@ if(CONFIG_OPENBMC_DBUS_SENSORS)
             ${ZEPHYR_CURRENT_MODULE_DIR}/src/PSUSensorMain.cpp
             ${ZEPHYR_CURRENT_MODULE_DIR}/src/PwmSensor.cpp
             # ${ZEPHYR_CURRENT_MODULE_DIR}/src/SensorPaths.cpp
-            # ${ZEPHYR_CURRENT_MODULE_DIR}/src/TachSensor.cpp
+            ${ZEPHYR_CURRENT_MODULE_DIR}/src/TachSensor.cpp
             # ${ZEPHYR_CURRENT_MODULE_DIR}/src/Thresholds.cpp
             # ${ZEPHYR_CURRENT_MODULE_DIR}/src/Utils.cpp
     )

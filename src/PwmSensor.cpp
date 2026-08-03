@@ -80,8 +80,13 @@ PwmSensor::PwmSensor(const std::string& name, const std::string& sysPath,
 
         double reqValue = (req / 100.0) * pwmMax;
         double respValue = (resp / 100.0) * pwmMax;
+#ifdef __ZEPHYR__
         auto reqInt = static_cast<uint32_t>(round(reqValue));
         auto respInt = static_cast<uint32_t>(round(respValue));
+#else
+        auto reqInt = static_cast<uint32_t>(std::round(reqValue));
+        auto respInt = static_cast<uint32_t>(std::round(respValue));
+#endif
         // Avoid floating-point equality, compare as integers
         if (reqInt == respInt)
         {
@@ -96,7 +101,11 @@ PwmSensor::PwmSensor(const std::string& name, const std::string& sysPath,
         },
         [this](double& curVal) {
         double currScaled = (curVal / 100.0) * pwmMax;
+#ifdef __ZEPHYR__
         auto currInt = static_cast<uint32_t>(round(currScaled));
+#else
+        auto currInt = static_cast<uint32_t>(std::round(currScaled));
+#endif
         auto getInt = getValue();
         // Avoid floating-point equality, compare as integers
         if (currInt != getInt)
@@ -129,7 +138,11 @@ PwmSensor::PwmSensor(const std::string& name, const std::string& sysPath,
             return 1;
         }
         auto scaledValue = static_cast<double>(req) / targetIfaceMax;
+#ifdef __ZEPHYR__
         auto roundValue = round(scaledValue * pwmMax);
+#else
+        auto roundValue = std::round(scaledValue * pwmMax);
+#endif
         setValue(static_cast<uint32_t>(roundValue));
         resp = req;
 
@@ -140,7 +153,11 @@ PwmSensor::PwmSensor(const std::string& name, const std::string& sysPath,
         [this](uint64_t& curVal) {
         auto getInt = getValue();
         auto scaledValue = static_cast<double>(getInt) / pwmMax;
+#ifdef __ZEPHYR__
         auto roundValue = round(scaledValue * targetIfaceMax);
+#else
+        auto roundValue = std::round(scaledValue * targetIfaceMax);
+#endif
         auto value = static_cast<uint64_t>(roundValue);
         if (curVal != value)
         {

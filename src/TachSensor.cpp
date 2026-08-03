@@ -71,7 +71,6 @@ TachSensor::TachSensor(const std::string& path, const std::string& objectType,
     }
     inputDev.assign(fd);
 #endif
-
     sensorInterface = objectServer.add_interface(
         "/xyz/openbmc_project/sensors/fan_tach/" + name,
         "xyz.openbmc_project.Sensor.Value");
@@ -126,10 +125,13 @@ TachSensor::~TachSensor()
 void TachSensor::setupRead()
 {
 #ifdef __ZEPHYR__
+    std::weak_ptr<TachSensor> weakRef = weak_from_this();
     boost::asio::async_read_until(inputDev, readBuf, '\n',
-                                  [&](const boost::system::error_code& ec,
-                                      std::size_t /*bytes_transfered*/) {
-        handleResponse(ec);
+                                  [weakRef](const boost::system::error_code& ec,
+                                            std::size_t /*bytes_transfered*/) {
+        auto self = weakRef.lock();
+        if (self)
+            self->handleResponse(ec);
     });
 #else
     std::weak_ptr<TachSensor> weakRef = weak_from_this();
@@ -166,51 +168,6 @@ void TachSensor::restartRead(size_t pollTime)
 #ifdef __ZEPHYR__
 void TachSensor::handleResponse(const boost::system::error_code& err)
 {
-    // if ((err == boost::system::errc::bad_file_descriptor) ||
-    //     (err == boost::asio::error::misc_errors::not_found))
-    // {
-    //     std::cerr << "TachSensor " << name << " removed " << path << "\n";
-    //     return; // we're being destroyed
-    // }
-    // bool missing = false;
-    // size_t pollTime = pwmPollMs;
-    // if (presence)
-    // {
-    //     if (!presence->getValue())
-    //     {
-    //         markAvailable(false);
-    //         missing = true;
-    //         pollTime = sensorFailedPollTimeMs;
-    //     }
-    //     itemIface->set_property("Present", !missing);
-    // }
-
-    // if (!missing)
-    // {
-    //     if (!err)
-    //     {
-    //         const char* bufEnd = readBuf.data() + bytesRead;
-    //         int nvalue = 0;
-    //         std::from_chars_result ret =
-    //             std::from_chars(readBuf.data(), bufEnd, nvalue);
-    //         if (ret.ec != std::errc())
-    //         {
-    //             incrementError();
-    //             pollTime = sensorFailedPollTimeMs;
-    //         }
-    //         else
-    //         {
-    //             updateValue(nvalue);
-    //         }
-    //     }
-    //     else
-    //     {
-    //         incrementError();
-    //         pollTime = sensorFailedPollTimeMs;
-    //     }
-    // }
-
-    // restartRead(pollTime);
     if (err == boost::system::errc::bad_file_descriptor)
     {
         return; // we're being destroyed
