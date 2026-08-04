@@ -43,7 +43,16 @@ IntelCPUSensor::IntelCPUSensor(
     const std::string& sensorConfiguration, int cpuId, bool show,
     double dtsOffset) :
     Sensor(escapeName(sensorName), std::move(thresholdsIn), sensorConfiguration,
-           objectType, false, false, 0, 0, conn, PowerState::on),
+           objectType, false, false, 0, 0, conn,
+#ifdef __ZEPHYR__
+           // Zephyr has no xyz.openbmc_project.State.Host service to report
+           // host power state, so treat the sensor as always readable instead
+           // of gating on a power state that never becomes "on".
+           PowerState::always
+#else
+           PowerState::on
+#endif
+           ),
     objServer(objectServer), inputDev(io), waitTimer(io),
     nameTcontrol("Tcontrol CPU" + std::to_string(cpuId)), path(path),
     privTcontrol(std::numeric_limits<double>::quiet_NaN()),
@@ -154,6 +163,12 @@ void IntelCPUSensor::setupRead(void)
         return;
     }
 
+#ifdef __ZEPHYR__
+    // On Zephyr, sysfs/hwmon files do not reliably signal readable events
+    // via boost::asio posix descriptor async_wait, so poll the fd directly
+    // and let handleResponse() reschedule the timer-driven read loop.
+    handleResponse(boost::system::error_code());
+#else
     std::weak_ptr<IntelCPUSensor> weakRef = weak_from_this();
     inputDev.async_wait(boost::asio::posix::descriptor_base::wait_read,
                         [weakRef](const boost::system::error_code& ec) {
@@ -164,6 +179,7 @@ void IntelCPUSensor::setupRead(void)
             self->handleResponse(ec);
         }
     });
+#endif
 }
 
 void IntelCPUSensor::updateMinMaxValues(void)

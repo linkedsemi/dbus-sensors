@@ -30,7 +30,17 @@ class IntelCPUSensor :
                    const std::string& configuration, int cpuId, bool show,
                    double dtsOffset);
     ~IntelCPUSensor() override;
+    // On Linux the peci_cputemp hwmon driver reports standard ABI units
+    // (temp in millidegrees, power in microwatts scaled by OpenBMC's
+    // convention), so the raw reading is divided by 1000. On Zephyr the
+    // peci_cputemp driver already returns physical values (degrees C, Watts)
+    // through hwmon_i2c without any 10^scale conversion, so dividing by 1000
+    // would be wrong -- use a scale of 1 to keep the value as-is.
+#ifdef __ZEPHYR__
+    static constexpr unsigned int sensorScaleFactor = 1;
+#else
     static constexpr unsigned int sensorScaleFactor = 1000;
+#endif
     static constexpr unsigned int sensorPollMs = 1000;
     static constexpr size_t warnAfterErrorCount = 10;
     static constexpr const char* labelTcontrol = "Tcontrol";

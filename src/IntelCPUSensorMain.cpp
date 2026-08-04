@@ -174,12 +174,42 @@ bool createSensors(boost::asio::io_context& io,
     }
 
     std::vector<fs::path> hwmonNamePaths;
+#ifdef __ZEPHYR__
+    // NOTE: findFiles' multi-level mode splits matchString on '/', which
+    // breaks regex pieces containing '/' inside a character class (e.g.
+    // "hwmon[^/]+"). Use a single-level match (no '/') and filter by the
+    // hwmon name content afterwards.
+    if (!findFiles(fs::path("/sys/class/hwmon"),
+                   R"(name$)", hwmonNamePaths, 1))
+    {
+        std::cerr << "No CPU sensors in system\n";
+        return true;
+    }
+    // filter to peci_cputemp nodes only
+    std::vector<fs::path> peciHwmonPaths;
+    for (const auto& p : hwmonNamePaths)
+    {
+        std::ifstream f(p);
+        std::string n;
+        if (f >> n && n == "peci_cputemp")
+        {
+            peciHwmonPaths.push_back(p);
+        }
+    }
+    if (peciHwmonPaths.empty())
+    {
+        std::cerr << "No peci_cputemp hwmon found\n";
+        return true;
+    }
+    hwmonNamePaths = std::move(peciHwmonPaths);
+#else
     if (!findFiles(fs::path(R"(/sys/bus/peci/devices/peci-0)"),
                    R"(\d+-.+/peci-.+/hwmon/hwmon\d+/name$)", hwmonNamePaths, 5))
     {
         std::cerr << "No CPU sensors in system\n";
         return true;
     }
+#endif
 
     boost::container::flat_set<std::string> scannedDirectories;
     boost::container::flat_set<std::string> createdSensors;
@@ -194,6 +224,9 @@ bool createSensors(boost::asio::io_context& io,
             continue; // already searched this path
         }
 
+        size_t bus = 0;
+        size_t addr = 0;
+#ifndef __ZEPHYR__
         fs::path::iterator it = hwmonNamePath.begin();
         std::advance(it, 6); // pick the 6th part for a PECI client device name
         std::string deviceName = *it;
@@ -206,8 +239,6 @@ bool createSensors(boost::asio::io_context& io,
         std::string busStr = deviceName.substr(0, findHyphen);
         std::string addrStr = deviceName.substr(findHyphen + 1);
 
-        size_t bus = 0;
-        size_t addr = 0;
         try
         {
             bus = std::stoi(busStr);
@@ -217,6 +248,7 @@ bool createSensors(boost::asio::io_context& io,
         {
             continue;
         }
+#endif
 
         std::ifstream nameFile(hwmonNamePath);
         if (!nameFile.good())
@@ -274,11 +306,13 @@ bool createSensors(boost::asio::io_context& io,
                 continue;
             }
 
+#ifndef __ZEPHYR__
             if (std::get<uint64_t>(configurationBus->second) != bus ||
                 std::get<uint64_t>(configurationAddress->second) != addr)
             {
                 continue;
             }
+#endif
 
             interfacePath = &path.str;
             break;
@@ -301,7 +335,7 @@ bool createSensors(boost::asio::io_context& io,
         auto directory = hwmonNamePath.parent_path();
         std::vector<fs::path> inputPaths;
         if (!findFiles(directory, R"((temp|power)\d+_(input|average|cap)$)",
-                       inputPaths, 0))
+                       inputPaths, 5))
         {
             std::cerr << "No temperature sensors in system\n";
             continue;
@@ -411,6 +445,11 @@ bool createSensors(boost::asio::io_context& io,
 
 void exportDevice(const CPUConfig& config)
 {
+#ifdef __ZEPHYR__
+    // Zephyr has no sysfs PECI bus / new_device export.
+    (void)config;
+    return;
+#endif
     std::ostringstream hex;
     hex << std::hex << config.addr;
     const std::string& addrHexStr = hex.str();
@@ -466,6 +505,28 @@ void detectCpu(boost::asio::steady_timer& pingTimer,
 
     for (CPUConfig& config : cpuConfigs)
     {
+#ifdef __ZEPHYR__
+        if (config.state == State::OFF)
+        {
+            std::cout << config.name << " is detected (Zephyr fake)\n";
+            config.state = State::READY;
+        }
+        if (config.state == State::READY)
+        {
+            // On Zephyr there is no real PECI ping; schedule createSensors
+            // the same way the non-Zephyr path does when a CPU becomes ready.
+            rescanDelaySeconds = 5;
+        }
+        if (config.state != State::READY)
+        {
+            keepPinging = true;
+        }
+        if (debug)
+        {
+            std::cout << config.name << ", state: " << config.state << "\n";
+        }
+        continue;
+#endif
         std::string peciDevPath = peciDev + std::to_string(config.bus);
 
         // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg)
