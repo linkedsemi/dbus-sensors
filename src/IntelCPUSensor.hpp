@@ -49,7 +49,9 @@ class IntelCPUSensor :
   private:
     sdbusplus::asio::object_server& objServer;
     boost::asio::streambuf readBuf;
+#ifndef __ZEPHYR__
     boost::asio::posix::stream_descriptor inputDev;
+#endif
     boost::asio::steady_timer waitTimer;
     std::string nameTcontrol;
     std::string path;

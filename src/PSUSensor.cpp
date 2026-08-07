@@ -21,7 +21,9 @@
 #include <fcntl.h>
 #endif
 
+#ifndef __ZEPHYR__
 #include <boost/asio/random_access_file.hpp>
+#endif
 #include <boost/asio/read_until.hpp>
 #include <sdbusplus/asio/connection.hpp>
 #include <sdbusplus/asio/object_server.hpp>
@@ -33,6 +35,7 @@
 #include <string>
 #include <system_error>
 #include <vector>
+#include <cerrno>
 
 static constexpr const char* sensorPathPrefix = "/xyz/openbmc_project/sensors/";
 
@@ -51,20 +54,16 @@ PSUSensor::PSUSensor(const std::string& path, const std::string& objectType,
     Sensor(escapeName(sensorName), std::move(thresholdsIn), sensorConfiguration,
            objectType, false, false, max, min, conn, powerState),
     objServer(objectServer),
-#ifdef __ZEPHYR__
-    inputDev(io),
-#else
+#ifndef __ZEPHYR__
     inputDev(io, path, boost::asio::random_access_file::read_only),
 #endif
     waitTimer(io), path(path), sensorFactor(factor), sensorOffset(offset),
     thresholdTimer(io)
 {
 #ifdef __ZEPHYR__
-    int fd = open(path.c_str(), O_RDONLY);
-    if (fd >= 0)
-    {
-        inputDev.assign(fd);
-    }
+    /* fd 留作 -1，由 setupRead() 在每次轮询时 open（hwmon_i2c 的 sysfs 属性
+     * 一次 open 只产出一次数据，故不能预开复用）。 */
+    fd = -1;
 #endif
     buffer = std::make_shared<std::array<char, 128>>();
     std::string unitPath = sensor_paths::getPathForUnits(sensorUnits);
@@ -113,7 +112,15 @@ PSUSensor::PSUSensor(const std::string& path, const std::string& objectType,
 PSUSensor::~PSUSensor()
 {
     waitTimer.cancel();
+#ifdef __ZEPHYR__
+    if (fd >= 0)
+    {
+        close(fd);
+        fd = -1;
+    }
+#else
     inputDev.close();
+#endif
     objServer.remove_interface(sensorInterface);
     for (const auto& iface : thresholdInterfaces)
     {
@@ -138,18 +145,50 @@ void PSUSensor::setupRead(void)
         return;
     }
 
+#ifdef __ZEPHYR__
+    /* hwmon_i2c 的 sysfs 属性是 "一次 open 只产出一次数据" 语义：open() 时
+     * 驱动将内部 ppos 清零，第一次 read() 产出数据后 ppos>0，后续 read()
+     * （即便 lseek 也无法重置 ppos）会直接返回 0(EOF)。因此必须每次轮询
+     * 重新 open，不能复用持久 fd / lseek，否则除首读外全部读到空 -> parse
+     * 失败。
+     * 读取使用 O_NONBLOCK：若 I2C 事务尚未就绪, read() 立即返回 -1/EAGAIN,
+     * 此时不阻塞本线程, 而是直接 restartRead 下一轮再试, 确保 io_context
+     * 线程永不被某个慢/无响应的传感器读卡住 (避免饿死 broker 与其他传感器,
+     * 这是之前累积性 stuck 的根因之一)。 */
+    if (fd >= 0)
+    {
+        close(fd);
+        fd = -1;
+    }
+    fd = open(path.c_str(), O_RDONLY | O_NONBLOCK);
+    if (fd < 0)
+    {
+        std::cerr << "PSU sensor " << name << " unable to open " << path
+                  << "\n";
+        restartRead();
+        return;
+    }
+
+    ssize_t bytesRead = read(fd, buffer->data(), buffer->size() - 1);
+    if (bytesRead < 0)
+    {
+        if (errno == EAGAIN || errno == EWOULDBLOCK)
+        {
+            /* Transaction not ready yet; do not block, just retry next poll. */
+            restartRead();
+            return;
+        }
+        bytesRead = 0;
+    }
+    handleResponse(boost::system::error_code(), static_cast<size_t>(bytesRead));
+#else
     std::weak_ptr<PSUSensor> weak = weak_from_this();
     // Note, we are building a asio buffer that is one char smaller than
     // the actual data structure, so that we can always append the null
     // terminator.  This can go away once std::from_chars<double> is available
     // in the standard
-#ifdef __ZEPHYR__
-    inputDev.async_read_some(
-        boost::asio::buffer(buffer->data(), buffer->size() - 1),
-#else
     inputDev.async_read_some_at(
         0, boost::asio::buffer(buffer->data(), buffer->size() - 1),
-#endif
         [weak, buffer{buffer}](const boost::system::error_code& ec,
                                size_t bytesRead) {
         std::shared_ptr<PSUSensor> self = weak.lock();
@@ -160,6 +199,7 @@ void PSUSensor::setupRead(void)
 
         self->handleResponse(ec, bytesRead);
         });
+#endif
 }
 
 void PSUSensor::restartRead(void)
@@ -211,25 +251,8 @@ void PSUSensor::handleResponse(const boost::system::error_code& err,
         incrementError();
     }
 
-#ifdef __ZEPHYR__
-    /* Zephyr devfs sysfs attributes return the value once per open (ppos),
-     * then EOF; async_read_some does not reset ppos. Reopen the fd each poll
-     * so every read gets a fresh value (mirrors HwmonTempSensor / ADCSensor).
-     * Without this, only the first poll returns data; later polls read EOF
-     * -> parse fails -> Value=nan. */
-    inputDev.close();
-    int fd = open(path.c_str(), O_RDONLY);
-    if (fd >= 0)
-    {
-        inputDev.assign(fd);
-    }
-    else
-    {
-        std::cerr << "PSU sensor " << name << " failed to reopen " << path
-                  << "\n";
-    }
-#endif
-
+    /* setupRead() closes+reopens the fd each poll (hwmon_i2c "one read per
+     * open" semantics), so no persistent fd state to rewind here. */
     restartRead();
 }
 

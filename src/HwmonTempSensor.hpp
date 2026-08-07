@@ -52,7 +52,16 @@ class HwmonTempSensor :
     std::array<char, 128> readBuf{};
     std::shared_ptr<I2CDevice> i2cDevice;
     sdbusplus::asio::object_server& objServer;
+#ifdef __ZEPHYR__
+    // On Zephyr we drive reads with a timer + a plain read(fd) and never
+    // register the fd with boost::asio's select_reactor. Registering a
+    // stream_descriptor (inputDev.assign) leaks a reactor descriptor_state on
+    // every poll cycle because the reactor has no real select() event to
+    // reclaim it, which eventually exhausts the 5 MB newlib malloc arena.
+    int fd = -1;
+#else
     boost::asio::posix::stream_descriptor inputDev;
+#endif
     boost::asio::steady_timer waitTimer;
     std::string path;
     double offsetValue;

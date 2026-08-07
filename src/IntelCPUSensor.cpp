@@ -19,6 +19,7 @@
 #include "Utils.hpp"
 
 #include <unistd.h>
+#include <cerrno>
 
 #include <boost/algorithm/string/replace.hpp>
 #include <boost/asio/read_until.hpp>
@@ -53,7 +54,11 @@ IntelCPUSensor::IntelCPUSensor(
            PowerState::on
 #endif
            ),
-    objServer(objectServer), inputDev(io), waitTimer(io),
+    objServer(objectServer),
+#ifndef __ZEPHYR__
+    inputDev(io),
+#endif
+    waitTimer(io),
     nameTcontrol("Tcontrol CPU" + std::to_string(cpuId)), path(path),
     privTcontrol(std::numeric_limits<double>::quiet_NaN()),
     dtsOffset(dtsOffset), show(show), pollTime(IntelCPUSensor::sensorPollMs)
@@ -105,7 +110,14 @@ IntelCPUSensor::IntelCPUSensor(
 IntelCPUSensor::~IntelCPUSensor()
 {
     // close the input dev to cancel async operations
+#ifndef __ZEPHYR__
     inputDev.close();
+#endif
+    if (fd >= 0)
+    {
+        close(fd);
+        fd = -1;
+    }
     waitTimer.cancel();
     if (show)
     {
@@ -143,6 +155,40 @@ void IntelCPUSensor::setupRead(void)
 {
     if (readingStateGood())
     {
+        // On Zephyr we drive reads with a timer + a plain read(fd) and never
+        // register the fd with boost::asio's select_reactor. Registering a
+        // stream_descriptor (inputDev.assign) leaks a reactor descriptor_state
+        // on every poll cycle because the reactor has no real select() event
+        // to reclaim it, which eventually exhausts the 5 MB newlib malloc
+        // arena and aborts with std::bad_alloc. So on Zephyr we only manage a
+        // bare fd and never touch inputDev at all.
+#ifdef __ZEPHYR__
+        // On Zephyr we drive reads with a timer + a plain read(fd) and never
+        // register the fd with boost::asio's select_reactor (that leaks a
+        // descriptor_state per poll cycle). hwmon sysfs is "one read per open":
+        // reopen every poll so we always get fresh data, and use O_NONBLOCK so
+        // a slow/unresponsive I2C transaction can never block this io_context
+        // thread (which would starve the broker and other sensors).
+        if (fd >= 0)
+        {
+            close(fd);
+            fd = -1;
+        }
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg)
+        fd = open(path.c_str(), O_RDONLY | O_NONBLOCK);
+        if (fd < 0)
+        {
+            std::cerr << name << " unable to open fd!\n";
+            return;
+        }
+#else
+        // Close any previously opened fd before opening a new one to avoid
+        // leaking file descriptors.
+        if (fd >= 0)
+        {
+            close(fd);
+            fd = -1;
+        }
         inputDev.close();
 
         // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg)
@@ -154,6 +200,7 @@ void IntelCPUSensor::setupRead(void)
         }
 
         inputDev.assign(fd);
+#endif
     }
     else
     {
@@ -270,6 +317,11 @@ void IntelCPUSensor::handleResponse(const boost::system::error_code& err)
     if (fd >= 0)
     {
 #ifdef __ZEPHYR__
+        // The fd is reopened every poll, so its position is already 0; use a
+        // plain read() (Zephyr's POSIX layer has no pread()). O_NONBLOCK was
+        // used at open(), so if the I2C transaction is not ready yet read()
+        // returns -1/EAGAIN; we treat that as "retry next poll" instead of an
+        // error so we never block this thread.
         rdLen = read(fd, response.data(), bufLen);
 #else
         rdLen = pread(fd, response.data(), bufLen, 0);
@@ -337,8 +389,28 @@ void IntelCPUSensor::handleResponse(const boost::system::error_code& err)
     }
     else
     {
+#ifdef __ZEPHYR__
+        // EAGAIN just means the I2C transaction is not ready yet; do NOT count
+        // it as a sensor error and do NOT tear down the fd. Simply reschedule;
+        // setupRead() reopens the fd on the next poll anyway.
+        if (rdLen < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+        {
+            restartRead();
+            return;
+        }
+#endif
         pollTime = sensorFailedPollTimeMs;
         incrementError();
+#ifdef __ZEPHYR__
+        // Drop the broken fd so the next setupRead() reopens it. Unlike the
+        // Linux path, Zephyr keeps a single long-lived fd, so we must force
+        // reopening here to self-heal after a transient read error.
+        if (fd >= 0)
+        {
+            close(fd);
+            fd = -1;
+        }
+#endif
     }
     restartRead();
 }

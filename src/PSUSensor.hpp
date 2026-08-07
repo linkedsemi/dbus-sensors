@@ -4,12 +4,7 @@
 #include "Thresholds.hpp"
 #include "sensor.hpp"
 
-#ifdef __ZEPHYR__
-/* boost::asio::random_access_file requires BOOST_ASIO_HAS_FILE (Windows-only);
- * on Zephyr (POSIX) use posix::stream_descriptor + async_read_some + per-poll
- * reopen, exactly like HwmonTempSensor (devfs sysfs attrs are once-per-open). */
-#include <boost/asio/posix/stream_descriptor.hpp>
-#else
+#ifndef __ZEPHYR__
 #include <boost/asio/random_access_file.hpp>
 #endif
 #include <sdbusplus/asio/object_server.hpp>
@@ -41,7 +36,15 @@ class PSUSensor : public Sensor, public std::enable_shared_from_this<PSUSensor>
     std::shared_ptr<std::array<char, 128>> buffer;
     sdbusplus::asio::object_server& objServer;
 #ifdef __ZEPHYR__
-    boost::asio::posix::stream_descriptor inputDev;
+    /* Reads are driven by waitTimer + a plain read()/lseek() on a persistent
+     * fd. The fd is deliberately NOT registered with boost::asio's
+     * select_reactor: on Zephyr select_reactor::register_descriptor() is a
+     * no-op that returns 0, so the reactor never tracks per-descriptor state
+     * and an fd that never becomes select()-readable leaves its reactor_op
+     * queued forever. Re-assigning the fd each poll therefore accumulated one
+     * orphaned read op (plus its handler allocation) per poll cycle, which is
+     * what leaked ~44 KB / 155 chunks every 30 s out of the 5 MB arena. */
+    int fd{-1};
 #else
     boost::asio::random_access_file inputDev;
 #endif
