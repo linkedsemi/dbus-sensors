@@ -19,7 +19,9 @@
 #include "SensorPaths.hpp"
 
 #ifdef __ZEPHYR__
+#include <cerrno>
 #include <fcntl.h>
+#include <unistd.h>
 #endif
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/read_until.hpp>
@@ -154,20 +156,13 @@ PSUSubEvent::PSUSubEvent(
     readState(powerState), waitTimer(io),
 
 #ifdef __ZEPHYR__
-    inputDev(io),
+    psuName(psuName), groupEventName(groupEventName), systemBus(conn)
 #else
     inputDev(io, path, boost::asio::random_access_file::read_only),
-#endif
     psuName(psuName), groupEventName(groupEventName), systemBus(conn)
+#endif
 {
     buffer = std::make_shared<std::array<char, 128>>();
-#ifdef __ZEPHYR__
-    int eventFd = open(path.c_str(), O_RDONLY);
-    if (eventFd >= 0)
-    {
-        inputDev.assign(eventFd);
-    }
-#endif
     if (pollRate > 0.0)
     {
         eventPollMs = static_cast<unsigned int>(pollRate * 1000);
@@ -200,7 +195,15 @@ PSUSubEvent::PSUSubEvent(
 PSUSubEvent::~PSUSubEvent()
 {
     waitTimer.cancel();
+#ifdef __ZEPHYR__
+    if (fd >= 0)
+    {
+        close(fd);
+        fd = -1;
+    }
+#else
     inputDev.close();
+#endif
 }
 
 void PSUSubEvent::setupRead(void)
@@ -218,14 +221,42 @@ void PSUSubEvent::setupRead(void)
         return;
     }
 
-    std::weak_ptr<PSUSubEvent> weakRef = weak_from_this();
 #ifdef __ZEPHYR__
-    inputDev.async_read_some(
-        boost::asio::buffer(buffer->data(), buffer->size() - 1),
+    /* On Zephyr, sysfs/hwmon attrs are "one read per open" (ppos then EOF);
+     * reopen every poll so every read gets a fresh value, and use O_NONBLOCK
+     * so a slow/unresponsive I2C transaction can never block this io_context
+     * thread. Never register the fd with boost::asio's select_reactor: doing
+     * so leaks a reactor descriptor_state per poll cycle. */
+    if (fd >= 0)
+    {
+        close(fd);
+        fd = -1;
+    }
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg)
+    fd = open(path.c_str(), O_RDONLY | O_NONBLOCK);
+    if (fd < 0)
+    {
+        std::cerr << eventName << " unable to open event fd!\n";
+        restartRead();
+        return;
+    }
+    ssize_t rdLen = read(fd, buffer->data(), buffer->size() - 1);
+    if (rdLen < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+    {
+        /* I2C transaction not ready yet; retry next poll. Do not tear down
+         * the fd; setupRead() reopens it on the next poll anyway. */
+        restartRead();
+        return;
+    }
+    /* On read failure (non-EAGAIN) report 0 bytes: handleResponse() then
+     * counts it as an error via errCount++ and keeps the poll loop alive
+     * instead of bailing out on bad_file_descriptor/not_found. */
+    handleResponse(boost::system::error_code(),
+                   rdLen > 0 ? static_cast<size_t>(rdLen) : 0);
 #else
+    std::weak_ptr<PSUSubEvent> weakRef = weak_from_this();
     inputDev.async_read_some_at(
         0, boost::asio::buffer(buffer->data(), buffer->size() - 1),
-#endif
         [weakRef, buffer{buffer}](const boost::system::error_code& ec,
                                   std::size_t bytesTransferred) {
         std::shared_ptr<PSUSubEvent> self = weakRef.lock();
@@ -234,6 +265,7 @@ void PSUSubEvent::setupRead(void)
             self->handleResponse(ec, bytesTransferred);
         }
         });
+#endif
 }
 
 void PSUSubEvent::restartRead()
@@ -302,16 +334,8 @@ void PSUSubEvent::handleResponse(const boost::system::error_code& err,
         updateValue(0);
         errCount++;
     }
-#ifdef __ZEPHYR__
-    /* devfs sysfs attrs return the value once per open (ppos) then EOF;
-     * reopen each poll so every read gets a fresh value. */
-    inputDev.close();
-    int eventFd = open(path.c_str(), O_RDONLY);
-    if (eventFd >= 0)
-    {
-        inputDev.assign(eventFd);
-    }
-#endif
+    /* On Zephyr the fd is reopened by setupRead() every poll, so no
+     * close/reopen is needed here. */
     restartRead();
 }
 

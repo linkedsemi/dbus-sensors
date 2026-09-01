@@ -70,7 +70,14 @@ class PSUSubEvent : public std::enable_shared_from_this<PSUSubEvent>
                         size_t bytesTransferred);
     void updateValue(const int& newValue);
 #ifdef __ZEPHYR__
-    boost::asio::posix::stream_descriptor inputDev;
+    /* On Zephyr we drive reads with a timer + a plain read(fd) and never
+     * register the fd with boost::asio's select_reactor. Registering a
+     * stream_descriptor (inputDev.assign) leaks a reactor descriptor_state
+     * on every poll cycle because the reactor has no real select() event
+     * to reclaim it, which eventually exhausts the malloc arena and aborts
+     * with std::bad_alloc. So on Zephyr we only manage a bare fd and never
+     * touch inputDev at all. */
+    int fd = -1;
 #else
     boost::asio::random_access_file inputDev;
 #endif
